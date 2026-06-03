@@ -501,19 +501,25 @@ impl Render for Sidebar {
                 let selected_key = selected_key.clone();
                 range.map(|i| {
                     let row = rows[i].clone();
+                    // Compact tree row constants — tighter than the theme defaults
+                    // so deep hierarchies don't squeeze content off the right edge.
+                    const TREE_ROW_H: f32 = 20.;
+                    const TREE_INDENT: f32 = 8.; // px per depth level
+                    const TREE_FS: f32 = theme::TEXT_SIZE_SM; // 12 px
+
                     match row {
                         FlatRow::Group { path, label, count, depth, is_open } => {
                             let chevron = if is_open { theme::ICON_CHEVRON_OPEN } else { theme::ICON_CHEVRON };
-                            let indent = depth as f32 * theme::PAD_LG;
+                            let indent = depth as f32 * TREE_INDENT;
                             let path_owned = path.clone();
                             div()
                                 .id(SharedString::from(format!("rg-{i}")))
-                                .h(px(theme::ROW_HEIGHT))
-                                .pl(px(theme::PAD_SM + indent))
-                                .pr(px(theme::PAD_SM))
-                                .flex().flex_row().items_center().gap(px(theme::PAD_XS))
+                                .h(px(TREE_ROW_H))
+                                .pl(px(theme::PAD_XS + indent))
+                                .pr(px(theme::PAD_XS))
+                                .flex().flex_row().items_center().gap(px(3.))
                                 .text_color(rgb(theme::TEXT))
-                                .text_size(px(theme::TEXT_SIZE))
+                                .text_size(px(TREE_FS))
                                 .bg(rgb(theme::SURFACE))
                                 .hover(|s| s.bg(rgb(theme::HOVER)))
                                 .on_click({
@@ -529,16 +535,25 @@ impl Render for Sidebar {
                                         });
                                     }
                                 })
-                                .child(div().w(px(14.)).flex_none().text_color(rgb(theme::TEXT_DIM)).text_size(px(theme::TEXT_SIZE_XS)).child(chevron))
+                                // Chevron
+                                .child(div().w(px(10.)).flex_none().text_color(rgb(theme::TEXT_DIM)).text_size(px(9.)).child(chevron))
+                                // Label
                                 .child(div().flex_grow().min_w_0().truncate().font_family(theme::FONT_MONO).child(SharedString::from(label)))
-                                .child(div().text_size(px(theme::TEXT_SIZE_XS)).text_color(rgb(theme::TEXT_DIM)).child(SharedString::from(format!("{count}"))))
+                                // Count badge — small, right-aligned
+                                .child(
+                                    div().flex_none().px(px(3.)).rounded(px(3.))
+                                        .bg(rgb(theme::BG_DEEP))
+                                        .text_size(px(9.)).text_color(rgb(theme::TEXT_DIM))
+                                        .child(SharedString::from(format!("{count}")))
+                                )
                                 .into_any_element()
                         }
                         FlatRow::Leaf { key, depth } => {
-                            let indent = depth as f32 * theme::PAD_LG;
-                            let is_selected_ref = selected_key.as_deref() == Some(&key.name);
+                            let indent = depth as f32 * TREE_INDENT;
+                            let is_sel = selected_key.as_deref() == Some(&key.name);
                             let key_name = key.name.clone();
-                            let type_icon = match key.type_name.as_str() {
+                            // Type as a tiny colored 1-char badge at the left.
+                            let type_char = match key.type_name.as_str() {
                                 "string" => "S", "list" => "L", "hash" => "H",
                                 "set" => "E", "zset" => "Z", _ => "?",
                             };
@@ -549,15 +564,15 @@ impl Render for Sidebar {
                             };
                             div()
                                 .id(SharedString::from(format!("rl-{i}")))
-                                .h(px(theme::ROW_HEIGHT))
-                                .pl(px(theme::PAD_SM + indent))
-                                .pr(px(theme::PAD_SM))
-                                .flex().flex_row().items_center().gap(px(theme::PAD_XS))
+                                .h(px(TREE_ROW_H))
+                                .pl(px(theme::PAD_XS + indent))
+                                .pr(px(theme::PAD_XS))
+                                .flex().flex_row().items_center().gap(px(3.))
                                 .border_l_2()
-                                .border_color(rgb(if is_selected_ref { theme::ACCENT } else { theme::BG_PANEL }))
-                                .bg(rgb(if is_selected_ref { theme::SELECTED } else { theme::BG_PANEL }))
-                                .text_color(rgb(if is_selected_ref { theme::TEXT } else { theme::TEXT_DIM }))
-                                .text_size(px(theme::TEXT_SIZE))
+                                .border_color(rgb(if is_sel { theme::ACCENT } else { theme::BG_PANEL }))
+                                .bg(rgb(if is_sel { theme::SELECTED } else { theme::BG_PANEL }))
+                                .text_color(rgb(if is_sel { theme::TEXT } else { theme::TEXT_DIM }))
+                                .text_size(px(TREE_FS))
                                 .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::TEXT)).border_color(rgb(theme::ACCENT)))
                                 .on_click({
                                     let entity = entity.clone();
@@ -569,7 +584,9 @@ impl Render for Sidebar {
                                         });
                                     }
                                 })
-                                .child(div().w(px(16.)).flex_none().justify_center().text_color(rgb(type_color)).text_size(px(theme::TEXT_SIZE_XS)).font_family(theme::FONT_MONO).child(type_icon))
+                                // Tiny type letter
+                                .child(div().flex_none().w(px(10.)).text_color(rgb(type_color)).text_size(px(9.)).font_family(theme::FONT_MONO).child(type_char))
+                                // Key name (full, truncated)
                                 .child(div().flex_grow().min_w_0().truncate().font_family(theme::FONT_MONO).child(SharedString::from(key.name.clone())))
                                 .into_any_element()
                         }
