@@ -42,8 +42,10 @@ pub struct Sidebar {
     redis_mode: bool,
     /// Filter text for the Redis key list.
     redis_filter: String,
-    /// Currently highlighted Redis key (for visual selection).
+    /// Currently highlighted Redis key.
     selected_key: Option<String>,
+    /// Which namespace groups are expanded (prefix string).
+    expanded_groups: std::collections::HashSet<String>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -59,6 +61,7 @@ impl Sidebar {
             redis_mode: false,
             redis_filter: String::new(),
             selected_key: None,
+            expanded_groups: std::collections::HashSet::new(),
         }
     }
 
@@ -266,6 +269,75 @@ impl Sidebar {
         row
     }
 
+    /// Group a Redis key list by the first `:` namespace segment.
+    /// Returns `(prefix, keys_in_group)` pairs; keys with no `:` go into a
+    /// `""` (ungrouped) bucket rendered directly without a group header.
+    fn group_keys<'a>(keys: &'a [crate::datasource::redis::RedisKey], filter: &str)
+        -> Vec<(String, Vec<&'a crate::datasource::redis::RedisKey>)>
+    {
+        let filter_lc = filter.to_lowercase();
+        let mut groups: std::collections::BTreeMap<String, Vec<&'a crate::datasource::redis::RedisKey>> =
+            std::collections::BTreeMap::new();
+        for key in keys {
+            if !filter_lc.is_empty() && !key.name.to_lowercase().contains(&filter_lc) {
+                continue;
+            }
+            let prefix = key.name.split(':').next().unwrap_or("").to_string();
+            let group_key = if key.name.contains(':') { prefix } else { String::new() };
+            groups.entry(group_key).or_default().push(key);
+        }
+        groups.into_iter().collect()
+    }
+
+    /// One namespace group header row (expandable).
+    fn group_row(&self, prefix: &str, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_open = self.expanded_groups.contains(prefix);
+        let chevron = if is_open { theme::ICON_CHEVRON_OPEN } else { theme::ICON_CHEVRON };
+        let prefix_owned = prefix.to_string();
+        div()
+            .id(SharedString::from(format!("rgroup-{prefix}")))
+            .h(px(theme::ROW_HEIGHT))
+            .px(px(theme::PAD_SM))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(theme::PAD_XS))
+            .text_color(rgb(theme::TEXT))
+            .text_size(px(theme::TEXT_SIZE))
+            .bg(rgb(theme::SURFACE))
+            .hover(|s| s.bg(rgb(theme::HOVER)))
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                if this.expanded_groups.contains(&prefix_owned) {
+                    this.expanded_groups.remove(&prefix_owned);
+                } else {
+                    this.expanded_groups.insert(prefix_owned.clone());
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .text_size(px(theme::TEXT_SIZE_XS))
+                    .child(chevron),
+            )
+            .child(
+                div()
+                    .flex_grow()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(theme::FONT_MONO)
+                    .child(SharedString::from(prefix.to_string())),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_SIZE_XS))
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .child(SharedString::from(format!("{count}"))),
+            )
+    }
+
     /// Simple inline filter bar for Redis key list.
     fn redis_filter_bar(&self) -> impl IntoElement {
         div()
@@ -293,11 +365,27 @@ impl Render for Sidebar {
         let mut tree = div().id("db-tree").flex().flex_col().overflow_y_scroll();
 
         if self.redis_mode {
-            // Redis: flat key list (filtered if redis_filter is set).
-            let filter = self.redis_filter.to_lowercase();
-            for key in self.redis_keys.clone() {
-                if filter.is_empty() || key.name.to_lowercase().contains(&filter) {
-                    tree = tree.child(self.key_row(&key, cx));
+            // Redis: grouped tree by first `:` namespace segment.
+            let groups = Self::group_keys(&self.redis_keys, &self.redis_filter);
+            for (prefix, keys) in groups {
+                if prefix.is_empty() {
+                    // Ungrouped keys (no `:`) — render directly.
+                    for key in keys {
+                        tree = tree.child(self.key_row(key, cx));
+                    }
+                } else {
+                    let count = keys.len();
+                    tree = tree.child(self.group_row(&prefix, count, cx));
+                    if self.expanded_groups.contains(&prefix) {
+                        for key in keys {
+                            // Indent key rows inside the group.
+                            tree = tree.child(
+                                div()
+                                    .pl(px(theme::PAD_LG))
+                                    .child(self.key_row(key, cx)),
+                            );
+                        }
+                    }
                 }
             }
         } else {

@@ -46,6 +46,8 @@ pub struct Workspace {
     _form_sub: Option<Subscription>,
     /// Subscriptions to each session's events (edit/delete connection).
     _session_subs: Vec<Subscription>,
+    /// Whether the saved-connections dropdown is open.
+    show_conn_list: bool,
 }
 
 impl Workspace {
@@ -60,6 +62,7 @@ impl Workspace {
             store,
             sessions: Vec::new(),
             active: Pane::Empty,
+            show_conn_list: false,
             form: None,
             editing_id: None,
             _form_sub: None,
@@ -137,6 +140,7 @@ impl Workspace {
         if index >= self.sessions.len() {
             return;
         }
+        self.show_conn_list = false;
         self.active = Pane::Session(index);
         self.store.last_open = Some(self.sessions[index].read(cx).config_id);
         self.store.save();
@@ -335,6 +339,34 @@ impl Workspace {
             );
         }
 
+        let show_list = self.show_conn_list;
+        // Saved-connections dropdown toggle.
+        bar = bar.child(
+            div()
+                .id("tab-conn-list")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.))
+                .h(px(theme::TAB_HEIGHT - 10.))
+                .px(px(theme::PAD_SM))
+                .rounded(px(theme::RADIUS_SM))
+                .text_color(rgb(if show_list { theme::ACCENT } else { theme::TEXT_DIM }))
+                .bg(rgb(if show_list { theme::SURFACE } else { theme::BG_PANEL }))
+                .text_size(px(theme::TEXT_SIZE_SM))
+                .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::TEXT)))
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.show_conn_list = !this.show_conn_list;
+                    cx.notify();
+                }))
+                .child("Connections")
+                .child(
+                    div().text_size(px(9.)).child(
+                        if show_list { "▴" } else { "▾" }
+                    )
+                ),
+        );
+
         // The "+" new-connection button.
         bar.child(
             div()
@@ -347,9 +379,135 @@ impl Workspace {
                 .text_color(rgb(theme::TEXT_DIM))
                 .text_size(px(theme::TEXT_SIZE))
                 .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::ACCENT)))
-                .on_click(cx.listener(|this, _ev, window, cx| this.open_form(window, cx)))
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.show_conn_list = false;
+                    this.open_form(window, cx);
+                }))
                 .child(theme::ICON_ADD),
         )
+    }
+
+    /// Dropdown panel listing all saved connections, anchored below the tab bar.
+    fn conn_dropdown(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.show_conn_list {
+            return None;
+        }
+        let connections = self.store.connections.clone();
+        if connections.is_empty() {
+            return Some(
+                div()
+                    .absolute()
+                    .top(px(theme::TAB_HEIGHT))
+                    .right(px(theme::PAD_LG))
+                    .w(px(280.))
+                    .p(px(theme::PAD_LG))
+                    .bg(rgb(theme::SURFACE))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .rounded(px(theme::RADIUS_LG))
+                    .shadow_lg()
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .text_size(px(theme::TEXT_SIZE_SM))
+                    .child("No saved connections — click + to add one")
+                    .occlude(),
+            );
+        }
+
+        let mut list = div()
+            .absolute()
+            .top(px(theme::TAB_HEIGHT))
+            .right(px(theme::PAD_LG))
+            .w(px(280.))
+            .bg(rgb(theme::SURFACE))
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .rounded(px(theme::RADIUS_LG))
+            .shadow_lg()
+            .occlude()
+            // Header
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(theme::ROW_HEIGHT))
+                    .px(px(theme::PAD_LG))
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(theme::BORDER))
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .text_size(px(theme::TEXT_SIZE_XS))
+                    .child(SharedString::from(format!(
+                        "{} saved connection{}",
+                        connections.len(),
+                        if connections.len() == 1 { "" } else { "s" }
+                    ))),
+            );
+
+        for cfg in connections {
+            let id = cfg.id;
+            let name = cfg.name.clone();
+            let kind_label = match cfg.kind {
+                crate::datasource::DbKind::Mysql => "MySQL",
+                crate::datasource::DbKind::Postgres => "PG",
+                crate::datasource::DbKind::Redis => "Redis",
+            };
+            let kind_color = match cfg.kind {
+                crate::datasource::DbKind::Mysql => theme::SYN_NUMBER,
+                crate::datasource::DbKind::Postgres => theme::ACCENT,
+                crate::datasource::DbKind::Redis => theme::SYN_KEYWORD,
+            };
+            let is_open = self.session_index(id, cx).is_some();
+
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("clist-{id}")))
+                    .h(px(theme::ROW_HEIGHT * 1.4))
+                    .px(px(theme::PAD_LG))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(theme::PAD_SM))
+                    .border_b_1()
+                    .border_color(rgb(theme::BORDER))
+                    .hover(|s| s.bg(rgb(theme::HOVER)))
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.show_conn_list = false;
+                        this.open_connection(id, window, cx);
+                        cx.notify();
+                    }))
+                    // Kind badge
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(theme::PAD_XS))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(rgb(theme::BG_DEEP))
+                            .text_color(rgb(kind_color))
+                            .text_size(px(theme::TEXT_SIZE_XS))
+                            .font_family(theme::FONT_MONO)
+                            .child(kind_label),
+                    )
+                    // Connection name
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(theme::TEXT_SIZE_SM))
+                            .text_color(rgb(if is_open { theme::ACCENT } else { theme::TEXT }))
+                            .child(SharedString::from(name)),
+                    )
+                    // "open" indicator
+                    .children(is_open.then(||
+                        div()
+                            .text_size(px(theme::TEXT_SIZE_XS))
+                            .text_color(rgb(theme::TEXT_DIM))
+                            .child("open"),
+                    )),
+            );
+        }
+
+        Some(list)
     }
 
     fn body(&self) -> impl IntoElement {
@@ -407,7 +565,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Root container sets the base font + size + text color so the whole
         // tree inherits the compact-professional defaults.
         div()
@@ -421,6 +579,7 @@ impl Render for Workspace {
             .text_color(rgb(theme::TEXT))
             .child(self.tab_bar(cx))
             .child(self.body())
+            .children(self.conn_dropdown(window, cx))
             .children(self.modal())
     }
 }
