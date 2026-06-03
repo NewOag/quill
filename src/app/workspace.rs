@@ -503,7 +503,35 @@ impl Workspace {
                             .text_size(px(theme::TEXT_SIZE_XS))
                             .text_color(rgb(theme::TEXT_DIM))
                             .child("open"),
-                    )),
+                    ))
+                    // Delete button — stops propagation so it doesn't also open
+                    // the connection.
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("clist-del-{id}")))
+                            .flex_none()
+                            .px(px(theme::PAD_XS))
+                            .rounded(px(theme::RADIUS_SM))
+                            .text_color(rgb(theme::TEXT_DIM))
+                            .text_size(px(theme::TEXT_SIZE_XS))
+                            .hover(|s| s.bg(rgb(theme::BG_DEEP)).text_color(rgb(theme::DANGER)))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |this, _ev, _w, cx| {
+                                    // Close the tab first (if open), then remove.
+                                    if let Some(i) = this.session_index(id, cx) {
+                                        this.close_tab(i, cx);
+                                    }
+                                    this.store.remove(id);
+                                    this.store.save();
+                                    if this.store.connections.is_empty() {
+                                        this.show_conn_list = false;
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                            .child(theme::ICON_CLOSE),
+                    ),
             );
         }
 

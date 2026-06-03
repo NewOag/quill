@@ -13,7 +13,21 @@ use gpui::{
 };
 
 use crate::datasource::TableInfo;
+use crate::datasource::redis::RedisKey;
 use crate::ui::theme;
+
+/// A node in the multi-level Redis key namespace tree.
+enum RedisTreeNode {
+    Group {
+        /// Full path, e.g. `"GATEWAY:CAS_LOGOUT"`.
+        path: String,
+        /// Just the last segment, e.g. `"CAS_LOGOUT"`.
+        label: String,
+        count: usize,
+        children: Vec<RedisTreeNode>,
+    },
+    Leaf(RedisKey),
+}
 
 /// Emitted when the user interacts with the tree. The Workspace handles these.
 #[derive(Debug, Clone)]
@@ -38,7 +52,7 @@ pub struct Sidebar {
     expanded: Option<String>,
     tables: Vec<TableInfo>,
     /// Redis key list (shown instead of databases when `redis_mode` is true).
-    redis_keys: Vec<crate::datasource::redis::RedisKey>,
+    redis_keys: Vec<RedisKey>,
     redis_mode: bool,
     /// Filter text for the Redis key list.
     redis_filter: String,
@@ -71,7 +85,7 @@ impl Sidebar {
     }
 
     /// Switch to Redis key-browser mode, showing the given keys.
-    pub fn set_redis_keys(&mut self, keys: Vec<crate::datasource::redis::RedisKey>) {
+    pub fn set_redis_keys(&mut self, keys: Vec<RedisKey>) {
         self.redis_mode = true;
         self.redis_keys = keys;
     }
@@ -217,7 +231,7 @@ impl Sidebar {
     }
 
     /// One clickable Redis key row.
-    fn key_row(&self, key: &crate::datasource::redis::RedisKey, cx: &mut Context<Self>) -> impl IntoElement {
+    fn key_row(&self, key: &RedisKey, cx: &mut Context<Self>) -> impl IntoElement {
         let name = key.name.clone();
         let is_selected = self.selected_key.as_deref() == Some(&key.name);
         let type_icon = match key.type_name.as_str() {
@@ -272,70 +286,127 @@ impl Sidebar {
     /// Group a Redis key list by the first `:` namespace segment.
     /// Returns `(prefix, keys_in_group)` pairs; keys with no `:` go into a
     /// `""` (ungrouped) bucket rendered directly without a group header.
-    fn group_keys<'a>(keys: &'a [crate::datasource::redis::RedisKey], filter: &str)
-        -> Vec<(String, Vec<&'a crate::datasource::redis::RedisKey>)>
-    {
+    /// Build a multi-level namespace tree from key names.
+    /// Each node is (full_path, label, leaf_count, children).
+    /// Keys whose remaining suffix after removing `parent_path:` have more `:`
+    /// are grouped further. `parent_path` is empty at the root.
+    fn build_tree(
+        keys: &[RedisKey],
+        parent_path: &str,
+        filter: &str,
+    ) -> Vec<RedisTreeNode> {
         let filter_lc = filter.to_lowercase();
-        let mut groups: std::collections::BTreeMap<String, Vec<&'a crate::datasource::redis::RedisKey>> =
+        // Partition into direct leaves and children grouped by next segment.
+        let mut children: std::collections::BTreeMap<String, Vec<&RedisKey>> =
             std::collections::BTreeMap::new();
+        let mut leaves: Vec<&RedisKey> = Vec::new();
         for key in keys {
             if !filter_lc.is_empty() && !key.name.to_lowercase().contains(&filter_lc) {
                 continue;
             }
-            let prefix = key.name.split(':').next().unwrap_or("").to_string();
-            let group_key = if key.name.contains(':') { prefix } else { String::new() };
-            groups.entry(group_key).or_default().push(key);
+            let suffix = if parent_path.is_empty() {
+                &key.name[..]
+            } else {
+                key.name.strip_prefix(parent_path)
+                    .and_then(|s| s.strip_prefix(':'))
+                    .unwrap_or(&key.name)
+            };
+            if let Some(next_seg) = suffix.find(':').map(|i| &suffix[..i]) {
+                let child_path = if parent_path.is_empty() {
+                    next_seg.to_string()
+                } else {
+                    format!("{parent_path}:{next_seg}")
+                };
+                children.entry(child_path).or_default().push(key);
+            } else {
+                leaves.push(key);
+            }
         }
-        groups.into_iter().collect()
+        let mut nodes: Vec<RedisTreeNode> = children
+            .into_iter()
+            .map(|(path, child_keys)| {
+                let label = path.rsplit(':').next().unwrap_or(&path).to_string();
+                let count = child_keys.len();
+                let owned: Vec<RedisKey> = child_keys.iter().map(|k| (*k).clone()).collect();
+                let sub = Self::build_tree(&owned, &path, filter);
+                RedisTreeNode::Group { path, label, count, children: sub }
+            })
+            .collect();
+        for k in leaves {
+            nodes.push(RedisTreeNode::Leaf(k.clone()));
+        }
+        nodes
     }
 
-    /// One namespace group header row (expandable).
-    fn group_row(&self, prefix: &str, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_open = self.expanded_groups.contains(prefix);
-        let chevron = if is_open { theme::ICON_CHEVRON_OPEN } else { theme::ICON_CHEVRON };
-        let prefix_owned = prefix.to_string();
-        div()
-            .id(SharedString::from(format!("rgroup-{prefix}")))
-            .h(px(theme::ROW_HEIGHT))
-            .px(px(theme::PAD_SM))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(theme::PAD_XS))
-            .text_color(rgb(theme::TEXT))
-            .text_size(px(theme::TEXT_SIZE))
-            .bg(rgb(theme::SURFACE))
-            .hover(|s| s.bg(rgb(theme::HOVER)))
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                if this.expanded_groups.contains(&prefix_owned) {
-                    this.expanded_groups.remove(&prefix_owned);
-                } else {
-                    this.expanded_groups.insert(prefix_owned.clone());
+    /// Render tree nodes at a given indent depth, returning a flat list of
+    /// elements to append to the scroll container.
+    fn render_tree_nodes(
+        &self,
+        nodes: &[RedisTreeNode],
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let indent = depth as f32 * theme::PAD_LG;
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+        for node in nodes {
+            match node {
+                RedisTreeNode::Group { path, label, count, children } => {
+                    let is_open = self.expanded_groups.contains(path);
+                    let chevron = if is_open { theme::ICON_CHEVRON_OPEN } else { theme::ICON_CHEVRON };
+                    let path_owned = path.clone();
+                    let row = div()
+                        .id(SharedString::from(format!("rgroup-{path}")))
+                        .h(px(theme::ROW_HEIGHT))
+                        .pl(px(theme::PAD_SM + indent))
+                        .pr(px(theme::PAD_SM))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(theme::PAD_XS))
+                        .text_color(rgb(theme::TEXT))
+                        .text_size(px(theme::TEXT_SIZE))
+                        .bg(rgb(theme::SURFACE))
+                        .hover(|s| s.bg(rgb(theme::HOVER)))
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            if this.expanded_groups.contains(&path_owned) {
+                                this.expanded_groups.remove(&path_owned);
+                            } else {
+                                this.expanded_groups.insert(path_owned.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(
+                            div().w(px(14.)).flex_none()
+                                .text_color(rgb(theme::TEXT_DIM))
+                                .text_size(px(theme::TEXT_SIZE_XS))
+                                .child(chevron),
+                        )
+                        .child(
+                            div().flex_grow().min_w_0().truncate()
+                                .font_family(theme::FONT_MONO)
+                                .child(SharedString::from(label.clone())),
+                        )
+                        .child(
+                            div().text_size(px(theme::TEXT_SIZE_XS))
+                                .text_color(rgb(theme::TEXT_DIM))
+                                .child(SharedString::from(format!("{count}"))),
+                        );
+                    out.push(row.into_any_element());
+                    if is_open {
+                        out.extend(self.render_tree_nodes(children, depth + 1, cx));
+                    }
                 }
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .w(px(14.))
-                    .flex_none()
-                    .text_color(rgb(theme::TEXT_DIM))
-                    .text_size(px(theme::TEXT_SIZE_XS))
-                    .child(chevron),
-            )
-            .child(
-                div()
-                    .flex_grow()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(theme::FONT_MONO)
-                    .child(SharedString::from(prefix.to_string())),
-            )
-            .child(
-                div()
-                    .text_size(px(theme::TEXT_SIZE_XS))
-                    .text_color(rgb(theme::TEXT_DIM))
-                    .child(SharedString::from(format!("{count}"))),
-            )
+                RedisTreeNode::Leaf(key) => {
+                    out.push(
+                        div()
+                            .pl(px(indent))
+                            .child(self.key_row(key, cx))
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        out
     }
 
     /// Simple inline filter bar for Redis key list.
@@ -365,29 +436,10 @@ impl Render for Sidebar {
         let mut tree = div().id("db-tree").flex().flex_col().overflow_y_scroll();
 
         if self.redis_mode {
-            // Redis: grouped tree by first `:` namespace segment.
-            let groups = Self::group_keys(&self.redis_keys, &self.redis_filter);
-            for (prefix, keys) in groups {
-                if prefix.is_empty() {
-                    // Ungrouped keys (no `:`) — render directly.
-                    for key in keys {
-                        tree = tree.child(self.key_row(key, cx));
-                    }
-                } else {
-                    let count = keys.len();
-                    tree = tree.child(self.group_row(&prefix, count, cx));
-                    if self.expanded_groups.contains(&prefix) {
-                        for key in keys {
-                            // Indent key rows inside the group.
-                            tree = tree.child(
-                                div()
-                                    .pl(px(theme::PAD_LG))
-                                    .child(self.key_row(key, cx)),
-                            );
-                        }
-                    }
-                }
-            }
+            // Redis: multi-level namespace tree (recursively split on ':').
+            let nodes = Self::build_tree(&self.redis_keys, "", &self.redis_filter);
+            let elems = self.render_tree_nodes(&nodes, 0, cx);
+            tree = tree.children(elems);
         } else {
             // SQL: database → table tree.
             for db in self.databases.clone() {
