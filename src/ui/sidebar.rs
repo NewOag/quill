@@ -9,7 +9,7 @@
 //! `Workspace` wires it up.
 
 use gpui::{
-    div, prelude::*, px, rgb, Context, EventEmitter, SharedString, Window,
+    div, prelude::*, px, rgb, uniform_list, Context, EventEmitter, SharedString, Window,
 };
 
 use crate::datasource::TableInfo;
@@ -27,6 +27,14 @@ enum RedisTreeNode {
         children: Vec<RedisTreeNode>,
     },
     Leaf(RedisKey),
+}
+
+/// A pre-order flattened row from the visible tree, used by `uniform_list`
+/// (which guarantees vertical scroll regardless of row count).
+#[derive(Clone)]
+enum FlatRow {
+    Group { path: String, label: String, count: usize, depth: usize, is_open: bool },
+    Leaf { key: RedisKey, depth: usize },
 }
 
 /// Emitted when the user interacts with the tree. The Workspace handles these.
@@ -231,6 +239,7 @@ impl Sidebar {
     }
 
     /// One clickable Redis key row.
+    #[allow(dead_code)]
     fn key_row(&self, key: &RedisKey, cx: &mut Context<Self>) -> impl IntoElement {
         let name = key.name.clone();
         let is_selected = self.selected_key.as_deref() == Some(&key.name);
@@ -338,6 +347,37 @@ impl Sidebar {
         nodes
     }
 
+    /// Flatten the visible tree into pre-order rows for `uniform_list`.
+    /// Only recurses into groups that are in `expanded_groups`.
+    fn flatten_tree(
+        nodes: &[RedisTreeNode],
+        depth: usize,
+        expanded: &std::collections::HashSet<String>,
+        out: &mut Vec<FlatRow>,
+    ) {
+        for node in nodes {
+            match node {
+                RedisTreeNode::Group { path, label, count, children } => {
+                    let is_open = expanded.contains(path);
+                    out.push(FlatRow::Group {
+                        path: path.clone(),
+                        label: label.clone(),
+                        count: *count,
+                        depth,
+                        is_open,
+                    });
+                    if is_open {
+                        Self::flatten_tree(children, depth + 1, expanded, out);
+                    }
+                }
+                RedisTreeNode::Leaf(key) => {
+                    out.push(FlatRow::Leaf { key: key.clone(), depth });
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
     /// Render tree nodes at a given indent depth, returning a flat list of
     /// elements to append to the scroll container.
     fn render_tree_nodes(
@@ -433,15 +473,118 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut tree = div().id("db-tree").flex().flex_col().overflow_y_scroll();
+        let sidebar_outer = div()
+            .w(px(theme::SIDEBAR_WIDTH))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(theme::BG_PANEL))
+            .border_r_1()
+            .border_color(rgb(theme::BORDER))
+            .child(self.header(cx));
 
         if self.redis_mode {
-            // Redis: multi-level namespace tree (recursively split on ':').
+            // Redis: flattened tree rows rendered via `uniform_list` so vertical
+            // scroll is guaranteed to work regardless of row count.
             let nodes = Self::build_tree(&self.redis_keys, "", &self.redis_filter);
-            let elems = self.render_tree_nodes(&nodes, 0, cx);
-            tree = tree.children(elems);
+            let mut rows: Vec<FlatRow> = Vec::new();
+            Self::flatten_tree(&nodes, 0, &self.expanded_groups, &mut rows);
+            let row_count = rows.len();
+            let rows = std::sync::Arc::new(rows);
+            let entity = cx.entity();
+
+            // Capture selected_key by value so the closure is 'static.
+            let selected_key = self.selected_key.clone();
+            let list = uniform_list("sidebar-redis", row_count, move |range, _w, _cx| {
+                let rows = rows.clone();
+                let entity = entity.clone();
+                let selected_key = selected_key.clone();
+                range.map(|i| {
+                    let row = rows[i].clone();
+                    match row {
+                        FlatRow::Group { path, label, count, depth, is_open } => {
+                            let chevron = if is_open { theme::ICON_CHEVRON_OPEN } else { theme::ICON_CHEVRON };
+                            let indent = depth as f32 * theme::PAD_LG;
+                            let path_owned = path.clone();
+                            div()
+                                .id(SharedString::from(format!("rg-{i}")))
+                                .h(px(theme::ROW_HEIGHT))
+                                .pl(px(theme::PAD_SM + indent))
+                                .pr(px(theme::PAD_SM))
+                                .flex().flex_row().items_center().gap(px(theme::PAD_XS))
+                                .text_color(rgb(theme::TEXT))
+                                .text_size(px(theme::TEXT_SIZE))
+                                .bg(rgb(theme::SURFACE))
+                                .hover(|s| s.bg(rgb(theme::HOVER)))
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_ev, _w, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            if this.expanded_groups.contains(&path_owned) {
+                                                this.expanded_groups.remove(&path_owned);
+                                            } else {
+                                                this.expanded_groups.insert(path_owned.clone());
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child(div().w(px(14.)).flex_none().text_color(rgb(theme::TEXT_DIM)).text_size(px(theme::TEXT_SIZE_XS)).child(chevron))
+                                .child(div().flex_grow().min_w_0().truncate().font_family(theme::FONT_MONO).child(SharedString::from(label)))
+                                .child(div().text_size(px(theme::TEXT_SIZE_XS)).text_color(rgb(theme::TEXT_DIM)).child(SharedString::from(format!("{count}"))))
+                                .into_any_element()
+                        }
+                        FlatRow::Leaf { key, depth } => {
+                            let indent = depth as f32 * theme::PAD_LG;
+                            let is_selected_ref = selected_key.as_deref() == Some(&key.name);
+                            let key_name = key.name.clone();
+                            let type_icon = match key.type_name.as_str() {
+                                "string" => "S", "list" => "L", "hash" => "H",
+                                "set" => "E", "zset" => "Z", _ => "?",
+                            };
+                            let type_color = match key.type_name.as_str() {
+                                "string" => theme::SYN_STRING, "list" => theme::SYN_NUMBER,
+                                "hash" => theme::SYN_KEYWORD, "set" => theme::ACCENT,
+                                "zset" => theme::SYN_COMMENT, _ => theme::TEXT_DIM,
+                            };
+                            div()
+                                .id(SharedString::from(format!("rl-{i}")))
+                                .h(px(theme::ROW_HEIGHT))
+                                .pl(px(theme::PAD_SM + indent))
+                                .pr(px(theme::PAD_SM))
+                                .flex().flex_row().items_center().gap(px(theme::PAD_XS))
+                                .border_l_2()
+                                .border_color(rgb(if is_selected_ref { theme::ACCENT } else { theme::BG_PANEL }))
+                                .bg(rgb(if is_selected_ref { theme::SELECTED } else { theme::BG_PANEL }))
+                                .text_color(rgb(if is_selected_ref { theme::TEXT } else { theme::TEXT_DIM }))
+                                .text_size(px(theme::TEXT_SIZE))
+                                .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::TEXT)).border_color(rgb(theme::ACCENT)))
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_ev, _w, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.selected_key = Some(key_name.clone());
+                                            cx.emit(SidebarEvent::KeySelected(key_name.clone()));
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child(div().w(px(16.)).flex_none().justify_center().text_color(rgb(type_color)).text_size(px(theme::TEXT_SIZE_XS)).font_family(theme::FONT_MONO).child(type_icon))
+                                .child(div().flex_grow().min_w_0().truncate().font_family(theme::FONT_MONO).child(SharedString::from(key.name.clone())))
+                                .into_any_element()
+                        }
+                    }
+                }).collect()
+            })
+            .flex_grow()
+            .min_h_0();
+
+            sidebar_outer
+                .children(self.redis_mode.then(|| self.redis_filter_bar()))
+                .child(list)
         } else {
-            // SQL: database → table tree.
+            // SQL: database → table tree (plain overflow_y_scroll, small number of rows).
+            let mut tree = div().id("db-tree").flex().flex_col().overflow_y_scroll().min_h_0();
             for db in self.databases.clone() {
                 tree = tree.child(self.db_row(&db, cx));
                 if self.expanded.as_deref() == Some(db.as_str()) {
@@ -450,18 +593,7 @@ impl Render for Sidebar {
                     }
                 }
             }
+            sidebar_outer.child(tree.flex_grow())
         }
-
-        div()
-            .w(px(theme::SIDEBAR_WIDTH))
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(theme::BG_PANEL))
-            .border_r_1()
-            .border_color(rgb(theme::BORDER))
-            .child(self.header(cx))
-            .children(self.redis_mode.then(|| self.redis_filter_bar()))
-            .child(tree.flex_grow())
     }
 }
