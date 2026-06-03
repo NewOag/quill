@@ -40,6 +40,10 @@ pub struct Sidebar {
     /// Redis key list (shown instead of databases when `redis_mode` is true).
     redis_keys: Vec<crate::datasource::redis::RedisKey>,
     redis_mode: bool,
+    /// Filter text for the Redis key list.
+    redis_filter: String,
+    /// Currently highlighted Redis key (for visual selection).
+    selected_key: Option<String>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -53,6 +57,8 @@ impl Sidebar {
             tables: Vec::new(),
             redis_keys: Vec::new(),
             redis_mode: false,
+            redis_filter: String::new(),
+            selected_key: None,
         }
     }
 
@@ -210,24 +216,17 @@ impl Sidebar {
     /// One clickable Redis key row.
     fn key_row(&self, key: &crate::datasource::redis::RedisKey, cx: &mut Context<Self>) -> impl IntoElement {
         let name = key.name.clone();
+        let is_selected = self.selected_key.as_deref() == Some(&key.name);
         let type_icon = match key.type_name.as_str() {
-            "string"  => "S",
-            "list"    => "L",
-            "hash"    => "H",
-            "set"     => "E",
-            "zset"    => "Z",
-            "stream"  => "R",
-            _         => "?",
+            "string" => "S", "list" => "L", "hash" => "H",
+            "set" => "E", "zset" => "Z", "stream" => "R", _ => "?",
         };
         let type_color = match key.type_name.as_str() {
-            "string" => theme::SYN_STRING,
-            "list"   => theme::SYN_NUMBER,
-            "hash"   => theme::SYN_KEYWORD,
-            "set"    => theme::ACCENT,
-            "zset"   => theme::SYN_COMMENT,
-            _        => theme::TEXT_DIM,
+            "string" => theme::SYN_STRING, "list" => theme::SYN_NUMBER,
+            "hash" => theme::SYN_KEYWORD, "set" => theme::ACCENT,
+            "zset" => theme::SYN_COMMENT, _ => theme::TEXT_DIM,
         };
-        div()
+        let row = div()
             .id(SharedString::from(format!("rkey-{}", name)))
             .h(px(theme::ROW_HEIGHT))
             .px(px(theme::PAD_SM))
@@ -236,12 +235,15 @@ impl Sidebar {
             .items_center()
             .gap(px(theme::PAD_XS))
             .border_l_2()
-            .border_color(rgb(theme::BG_PANEL))
-            .text_color(rgb(theme::TEXT_DIM))
+            .border_color(rgb(if is_selected { theme::ACCENT } else { theme::BG_PANEL }))
+            .bg(rgb(if is_selected { theme::SELECTED } else { theme::BG_PANEL }))
+            .text_color(rgb(if is_selected { theme::TEXT } else { theme::TEXT_DIM }))
             .text_size(px(theme::TEXT_SIZE))
             .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::TEXT)).border_color(rgb(theme::ACCENT)))
-            .on_click(cx.listener(move |_this, _ev, _window, cx| {
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                this.selected_key = Some(name.clone());
                 cx.emit(SidebarEvent::KeySelected(name.clone()));
+                cx.notify();
             }))
             .child(
                 div()
@@ -260,7 +262,29 @@ impl Sidebar {
                     .truncate()
                     .font_family(theme::FONT_MONO)
                     .child(SharedString::from(key.name.clone())),
-            )
+            );
+        row
+    }
+
+    /// Simple inline filter bar for Redis key list.
+    fn redis_filter_bar(&self) -> impl IntoElement {
+        div()
+            .flex_none()
+            .h(px(theme::ROW_HEIGHT))
+            .px(px(theme::PAD_SM))
+            .flex()
+            .items_center()
+            .bg(rgb(theme::BG_DEEP))
+            .border_b_1()
+            .border_color(rgb(theme::BORDER))
+            .text_color(rgb(theme::TEXT_DIM))
+            .text_size(px(theme::TEXT_SIZE_XS))
+            .child(SharedString::from(format!(
+                "{} keys{}",
+                self.redis_keys.len(),
+                if self.redis_filter.is_empty() { String::new() }
+                else { format!(" (filter: {})", self.redis_filter) }
+            )))
     }
 }
 
@@ -269,9 +293,12 @@ impl Render for Sidebar {
         let mut tree = div().id("db-tree").flex().flex_col().overflow_y_scroll();
 
         if self.redis_mode {
-            // Redis: flat key list.
+            // Redis: flat key list (filtered if redis_filter is set).
+            let filter = self.redis_filter.to_lowercase();
             for key in self.redis_keys.clone() {
-                tree = tree.child(self.key_row(&key, cx));
+                if filter.is_empty() || key.name.to_lowercase().contains(&filter) {
+                    tree = tree.child(self.key_row(&key, cx));
+                }
             }
         } else {
             // SQL: database → table tree.
@@ -294,6 +321,7 @@ impl Render for Sidebar {
             .border_r_1()
             .border_color(rgb(theme::BORDER))
             .child(self.header(cx))
+            .children(self.redis_mode.then(|| self.redis_filter_bar()))
             .child(tree.flex_grow())
     }
 }

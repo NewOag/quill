@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::app::db::Db;
 use crate::datasource::{Column, QueryResult, QueryState, Row, TableInfo};
 use crate::ui::editor::{EditorEvent, QueryEditor};
+use crate::ui::redis_view::RedisView;
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::table::DataTable;
 use crate::ui::theme;
@@ -48,8 +49,11 @@ pub struct Session {
     /// `Some` for a real connection; `None` only in sample mode.
     db: Option<Db>,
     sidebar: Entity<Sidebar>,
-    editor: Entity<QueryEditor>,
-    table: Entity<DataTable>,
+    /// SQL mode panes (None for Redis connections).
+    editor: Option<Entity<QueryEditor>>,
+    table: Option<Entity<DataTable>>,
+    /// Redis mode view (None for SQL connections).
+    redis_view: Option<Entity<RedisView>>,
 
     /// Subscriptions to the panes; held so they live as long as this session.
     _subs: Vec<Subscription>,
@@ -74,15 +78,22 @@ impl Session {
             .unwrap_or_else(|| "sample (no DB)".to_string());
 
         let sidebar = cx.new(|_| Sidebar::new(label));
-        let editor = cx.new(|cx| QueryEditor::new(window, cx));
-        let table = cx.new(|_| DataTable::new());
+        let is_redis = db.as_ref().map(|d| !d.is_sql()).unwrap_or(false);
 
-        // Own the subscriptions explicitly (instead of detach) to document that
-        // they live with this session and die when the tab closes.
-        let subs = vec![
-            cx.subscribe(&sidebar, Self::on_sidebar_event),
-            cx.subscribe(&editor, Self::on_editor_event),
-        ];
+        // Build SQL or Redis panes depending on the connection type.
+        let (editor, table, redis_view) = if is_redis {
+            let rv = cx.new(|cx| RedisView::new(db.clone(), window, cx));
+            (None, None, Some(rv))
+        } else {
+            let e = cx.new(|cx| QueryEditor::new(window, cx));
+            let t = cx.new(|_| DataTable::new());
+            (Some(e), Some(t), None)
+        };
+
+        let mut subs = vec![cx.subscribe(&sidebar, Self::on_sidebar_event)];
+        if let Some(ed) = &editor {
+            subs.push(cx.subscribe(ed, Self::on_editor_event));
+        }
 
         let mut this = Self {
             config_id,
@@ -90,14 +101,18 @@ impl Session {
             sidebar,
             editor,
             table,
+            redis_view,
             _subs: subs,
             _schema_task: None,
             _query_task: None,
         };
 
-        this.editor.update(cx, |e, cx| e.focus(window, cx));
-        // Redis: show key browser; SQL: show database tree.
-        if this.db.as_ref().map(|d| !d.is_sql()).unwrap_or(false) {
+        // Focus SQL editor immediately.
+        if let Some(ed) = &this.editor {
+            ed.update(cx, |e, cx| e.focus(window, cx));
+        }
+
+        if is_redis {
             this.load_redis_keys(cx);
         } else {
             this.load_databases(cx);
@@ -117,10 +132,16 @@ impl Session {
             SidebarEvent::DatabaseSelected(db_name) => self.load_tables(db_name.clone(), cx),
             SidebarEvent::TableSelected { database, table } => {
                 let sql = select_all_sql(database, table, ROW_LIMIT);
-                self.editor.update(cx, |e, cx| e.set_sql(sql.clone(), cx));
+                if let Some(ed) = &self.editor {
+                    ed.update(cx, |e, cx| e.set_sql(sql.clone(), cx));
+                }
                 self.run_query(sql, cx);
             }
-            SidebarEvent::KeySelected(key) => self.run_redis_key(key.clone(), cx),
+            SidebarEvent::KeySelected(key) => {
+                if let Some(rv) = &self.redis_view {
+                    rv.update(cx, |v, cx| v.load_key(key.clone(), cx));
+                }
+            }
             SidebarEvent::EditConnection => cx.emit(SessionEvent::EditConnection),
             SidebarEvent::DeleteConnection => cx.emit(SessionEvent::DeleteConnection),
         }
@@ -196,14 +217,15 @@ impl Session {
     }
 
     fn run_query(&mut self, sql: String, cx: &mut Context<Self>) {
+        let Some(table_entity) = self.table.clone() else { return };
         let preview = sql.chars().take(60).collect::<String>();
-        self.table.update(cx, |t, cx| {
+        table_entity.update(cx, |t, cx| {
             t.set_state(QueryState::Loading(preview));
             cx.notify();
         });
 
         let Some(db) = self.db.clone() else {
-            self.table.update(cx, |t, cx| {
+            table_entity.update(cx, |t, cx| {
                 t.set_state(QueryState::Loaded(sample_result()));
                 cx.notify();
             });
@@ -211,7 +233,7 @@ impl Session {
         };
 
         let handle = db.handle();
-        let table = self.table.clone();
+        let table = table_entity;
         self._query_task = Some(cx.spawn(async move |_weak, cx| {
             let (tx, rx) = futures::channel::oneshot::channel();
             let sql_for_log = sql.clone();
@@ -268,65 +290,29 @@ impl Session {
         }));
     }
 
-    fn run_redis_key(&mut self, key: String, cx: &mut Context<Self>) {
-        self.table.update(cx, |t, cx| {
-            t.set_state(QueryState::Loading(key.clone()));
-            cx.notify();
-        });
-        let Some(db) = self.db.clone() else { return };
-        let handle = db.handle();
-        let table = self.table.clone();
-        self._query_task = Some(cx.spawn(async move |_weak, cx| {
-            let (tx, rx) = futures::channel::oneshot::channel();
-            handle.spawn(async move {
-                let _ = tx.send(db.redis_get(&key).await);
-            });
-            let state = match rx.await {
-                Ok(Ok(val)) => {
-                    // Wrap the Redis value as a one-row QueryResult so the
-                    // existing results table + detail panel can display it.
-                    use crate::datasource::{Column, QueryResult, Row};
-                    let result = QueryResult {
-                        columns: vec![
-                            Column { name: "key".into(), type_name: val.type_name.clone() },
-                            Column { name: "value".into(), type_name: val.type_name },
-                        ],
-                        rows: vec![Row { cells: vec![
-                            Some(val.key),
-                            Some(val.display),
-                        ]}],
-                    };
-                    QueryState::Loaded(result)
-                }
-                Ok(Err(e)) => QueryState::Error(format!("{e:#}")),
-                Err(_) => QueryState::Error("key fetch dropped".into()),
-            };
-            let _ = table.update(cx, |t, cx| {
-                t.set_state(state);
-                cx.notify();
-            });
-        }));
-    }
 }
 
 impl Render for Session {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // The session is just its main area: sidebar | (editor over results).
-        // The tab bar lives in `Workspace`.
+        let main = if let Some(rv) = &self.redis_view {
+            // Redis: dedicated key-value view (no SQL editor).
+            div().flex_grow().child(rv.clone())
+        } else {
+            // SQL: editor + results table.
+            div()
+                .flex_grow()
+                .flex()
+                .flex_col()
+                .children(self.editor.clone())
+                .children(self.table.as_ref().map(|t| div().flex_grow().child(t.clone())))
+        };
         div()
             .size_full()
             .flex()
             .flex_row()
             .bg(rgb(theme::BG_DEEP))
             .child(self.sidebar.clone())
-            .child(
-                div()
-                    .flex_grow()
-                    .flex()
-                    .flex_col()
-                    .child(self.editor.clone())
-                    .child(div().flex_grow().child(self.table.clone())),
-            )
+            .child(main)
     }
 }
 

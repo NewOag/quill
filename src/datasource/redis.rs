@@ -1,8 +1,8 @@
 //! Redis data source backed by `redis-rs` with the async tokio driver.
 //!
-//! Redis does not fit the rows/columns model — it uses its own [`KeyBrowser`]
-//! trait. The `Db` layer exposes a thin Redis API (`scan_keys`, `get_value`)
-//! that the UI consumes without ever depending on redis-rs types directly.
+//! The data model here is deliberately richer than the SQL layer — Redis values
+//! are typed (string/list/hash/set/zset) and are returned as structured
+//! [`RedisValue`] variants so the UI can render each differently.
 
 use anyhow::{Context as _, Result};
 use redis::aio::MultiplexedConnection;
@@ -16,26 +16,54 @@ pub struct RedisKey {
     pub type_name: String,
 }
 
-/// The value of one Redis key serialised as a display string.
-/// All variants are flattened to `String` so the UI can pass them through the
-/// generic `QueryResult` / detail-panel pipeline without special casing.
+/// Structured value of one Redis key.
 #[derive(Debug, Clone)]
-pub struct RedisValue {
+pub enum RedisValue {
+    Str(String),
+    List(Vec<String>),
+    Set(Vec<String>),
+    Hash(Vec<(String, String)>),
+    /// Sorted set: (member, score) pairs, ordered by score.
+    ZSet(Vec<(String, f64)>),
+    /// Unknown or unsupported type.
+    Unknown(String),
+}
+
+/// Full detail for one Redis key, including TTL.
+#[derive(Debug, Clone)]
+pub struct RedisKeyDetail {
     pub key: String,
     pub type_name: String,
-    /// The value, already formatted for display (JSON-like for collections).
-    pub display: String,
+    /// Remaining TTL in seconds. -1 = no expiry, -2 = key not found.
+    pub ttl: i64,
+    pub value: RedisValue,
+}
+
+impl RedisKeyDetail {
+    /// A short human-readable TTL string for the UI.
+    pub fn ttl_label(&self) -> String {
+        match self.ttl {
+            -2 => "not found".into(),
+            -1 => "no expiry".into(),
+            s if s < 60 => format!("{s}s"),
+            s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
+            s => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+        }
+    }
 }
 
 /// Browse a Redis instance.
 #[allow(async_fn_in_trait)]
 pub trait KeyBrowser {
-    /// Scan keys matching a glob pattern (e.g. `*`, `user:*`), up to `count`
-    /// results.
+    /// Scan keys matching a glob pattern, up to `count` results.
     async fn scan_keys(&mut self, pattern: &str, count: usize) -> Result<Vec<RedisKey>>;
 
-    /// Fetch the value of one key and format it for display.
-    async fn get_value(&mut self, key: &str) -> Result<RedisValue>;
+    /// Fetch the typed value + TTL for one key.
+    async fn get_value(&mut self, key: &str) -> Result<RedisKeyDetail>;
+
+    /// Execute an arbitrary Redis command line (space-separated tokens) and
+    /// return the response as a display string.
+    async fn exec_cmd(&mut self, cmd_line: &str) -> Result<String>;
 }
 
 /// A live Redis connection.
@@ -48,13 +76,11 @@ pub struct RedisSource {
 impl RedisSource {
     /// Connect to Redis. Must be called from within a tokio runtime context.
     pub async fn connect(url: &str) -> Result<Self> {
-        let client =
-            redis::Client::open(url).context("invalid Redis URL")?;
+        let client = redis::Client::open(url).context("invalid Redis URL")?;
         let conn = client
             .get_multiplexed_tokio_connection()
             .await
             .context("failed to connect to Redis")?;
-        // Label: extract host from URL.
         let label = url
             .trim_start_matches("redis://")
             .split('/')
@@ -67,8 +93,6 @@ impl RedisSource {
 
 impl KeyBrowser for RedisSource {
     async fn scan_keys(&mut self, pattern: &str, count: usize) -> Result<Vec<RedisKey>> {
-        // SCAN with MATCH — collect into a Vec first, then drop the iter so
-        // we can borrow self.conn again for the TYPE pipeline.
         let keys: Vec<String> = {
             let mut acc: Vec<String> = Vec::new();
             let mut iter: redis::AsyncIter<String> = self
@@ -85,7 +109,7 @@ impl KeyBrowser for RedisSource {
             acc
         };
 
-        // Fetch type for each key via a pipeline for efficiency.
+        // Fetch types via pipeline.
         let mut pipe = redis::pipe();
         for k in &keys {
             pipe.cmd("TYPE").arg(k);
@@ -102,68 +126,86 @@ impl KeyBrowser for RedisSource {
             .collect())
     }
 
-    async fn get_value(&mut self, key: &str) -> Result<RedisValue> {
+    async fn get_value(&mut self, key: &str) -> Result<RedisKeyDetail> {
         let type_name: String = redis::cmd("TYPE")
             .arg(key)
             .query_async(&mut self.conn)
             .await
             .unwrap_or_else(|_| "?".into());
 
-        let display = match type_name.as_str() {
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(key)
+            .query_async(&mut self.conn)
+            .await
+            .unwrap_or(-1);
+
+        let value = match type_name.as_str() {
             "string" => {
-                let v: Option<String> = self.conn.get(key).await.ok();
-                v.unwrap_or_else(|| "(nil)".into())
+                let v: Option<String> = self.conn.get(key).await.ok().flatten();
+                RedisValue::Str(v.unwrap_or_else(|| "(nil)".into()))
             }
             "list" => {
-                let v: Vec<String> = self.conn.lrange(key, 0, 99).await.unwrap_or_default();
-                format_list(&v)
+                let v: Vec<String> = self.conn.lrange(key, 0, 499).await.unwrap_or_default();
+                RedisValue::List(v)
             }
             "set" => {
                 let v: Vec<String> = self.conn.smembers(key).await.unwrap_or_default();
-                format_list(&v)
+                RedisValue::Set(v)
             }
             "hash" => {
                 let v: Vec<(String, String)> =
                     self.conn.hgetall(key).await.unwrap_or_default();
-                format_hash(&v)
+                RedisValue::Hash(v)
             }
             "zset" => {
                 let v: Vec<(String, f64)> = self
                     .conn
-                    .zrange_withscores(key, 0isize, 99isize)
+                    .zrange_withscores(key, 0isize, 499isize)
                     .await
                     .unwrap_or_default();
-                format_zset(&v)
+                RedisValue::ZSet(v)
             }
-            _ => format!("(type={type_name}, cannot display)"),
+            other => RedisValue::Unknown(format!("unsupported type: {other}")),
         };
 
-        Ok(RedisValue {
+        Ok(RedisKeyDetail {
             key: key.to_string(),
             type_name,
-            display,
+            ttl,
+            value,
         })
+    }
+
+    async fn exec_cmd(&mut self, cmd_line: &str) -> Result<String> {
+        let tokens: Vec<&str> = cmd_line.split_whitespace().collect();
+        if tokens.is_empty() {
+            return Ok(String::new());
+        }
+        let mut cmd = redis::cmd(tokens[0]);
+        for arg in &tokens[1..] {
+            cmd.arg(arg);
+        }
+        let value: redis::Value = cmd
+            .query_async(&mut self.conn)
+            .await
+            .context("command failed")?;
+        Ok(redis_value_to_string(&value))
     }
 }
 
-fn format_list(items: &[String]) -> String {
-    let entries: Vec<String> = items
-        .iter()
-        .enumerate()
-        .map(|(i, v)| format!("{i}: {v}"))
-        .collect();
-    entries.join("\n")
-}
-
-fn format_hash(pairs: &[(String, String)]) -> String {
-    let entries: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-    entries.join("\n")
-}
-
-fn format_zset(pairs: &[(String, f64)]) -> String {
-    let entries: Vec<String> = pairs
-        .iter()
-        .map(|(m, s)| format!("{s:.4}  {m}"))
-        .collect();
-    entries.join("\n")
+/// Render a redis::Value as a human-readable string (redis 0.25 variants).
+fn redis_value_to_string(v: &redis::Value) -> String {
+    match v {
+        redis::Value::Nil => "(nil)".into(),
+        redis::Value::Int(n) => format!("(integer) {n}"),
+        redis::Value::Data(b) => String::from_utf8_lossy(b).into_owned(),
+        redis::Value::Status(s) => s.clone(),
+        redis::Value::Okay => "OK".into(),
+        redis::Value::Bulk(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("{}) {}", i + 1, redis_value_to_string(v)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }

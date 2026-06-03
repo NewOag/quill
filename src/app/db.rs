@@ -17,7 +17,7 @@ use tokio::runtime::Handle;
 
 use crate::datasource::mysql::{self, MysqlSource};
 use crate::datasource::postgres::PostgresSource;
-use crate::datasource::redis::{KeyBrowser, RedisKey, RedisSource, RedisValue};
+use crate::datasource::redis::{KeyBrowser, RedisKey, RedisKeyDetail, RedisSource};
 use crate::datasource::{DataSource, DbKind, QueryResult, SchemaProvider, TableInfo};
 
 /// The active connection, one variant per engine.
@@ -137,10 +137,18 @@ impl Db {
         }
     }
 
-    /// Fetch one Redis key's value.
-    pub async fn redis_get(&self, key: &str) -> Result<RedisValue> {
+    /// Fetch one Redis key's value + TTL.
+    pub async fn redis_get(&self, key: &str) -> Result<RedisKeyDetail> {
         match &self.conn {
             Conn::Redis(src) => { let mut src = src.clone(); src.get_value(key).await }
+            _ => bail!("not a Redis connection"),
+        }
+    }
+
+    /// Execute an arbitrary Redis command line and return the response string.
+    pub async fn redis_cmd(&self, cmd_line: &str) -> Result<String> {
+        match &self.conn {
+            Conn::Redis(src) => { let mut src = src.clone(); src.exec_cmd(cmd_line).await }
             _ => bail!("not a Redis connection"),
         }
     }
