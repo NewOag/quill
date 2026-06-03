@@ -22,6 +22,8 @@ pub enum SidebarEvent {
     DatabaseSelected(String),
     /// User clicked a table (request to query it).
     TableSelected { database: String, table: String },
+    /// User clicked a Redis key (request to fetch its value).
+    KeySelected(String),
     /// User clicked the edit (✎) button on the connection header.
     EditConnection,
     /// User clicked the delete (✕) button on the connection header.
@@ -35,6 +37,9 @@ pub struct Sidebar {
     /// The currently expanded database and its tables, if loaded.
     expanded: Option<String>,
     tables: Vec<TableInfo>,
+    /// Redis key list (shown instead of databases when `redis_mode` is true).
+    redis_keys: Vec<crate::datasource::redis::RedisKey>,
+    redis_mode: bool,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -46,12 +51,20 @@ impl Sidebar {
             databases: Vec::new(),
             expanded: None,
             tables: Vec::new(),
+            redis_keys: Vec::new(),
+            redis_mode: false,
         }
     }
 
     /// Replace the database list (called after `list_databases` resolves).
     pub fn set_databases(&mut self, databases: Vec<String>) {
         self.databases = databases;
+    }
+
+    /// Switch to Redis key-browser mode, showing the given keys.
+    pub fn set_redis_keys(&mut self, keys: Vec<crate::datasource::redis::RedisKey>) {
+        self.redis_mode = true;
+        self.redis_keys = keys;
     }
 
     /// Mark a database expanded and show its tables (after `list_tables`).
@@ -82,6 +95,9 @@ impl Sidebar {
             .child(
                 div()
                     .flex_grow()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .truncate()
                     .text_color(rgb(theme::TEXT))
                     .text_size(px(theme::TEXT_SIZE_SM))
                     .child(self.connection_label.clone()),
@@ -190,18 +206,81 @@ impl Sidebar {
             .child(Self::icon_cell(icon, icon_color))
             .child(SharedString::from(t.name.clone()))
     }
+
+    /// One clickable Redis key row.
+    fn key_row(&self, key: &crate::datasource::redis::RedisKey, cx: &mut Context<Self>) -> impl IntoElement {
+        let name = key.name.clone();
+        let type_icon = match key.type_name.as_str() {
+            "string"  => "S",
+            "list"    => "L",
+            "hash"    => "H",
+            "set"     => "E",
+            "zset"    => "Z",
+            "stream"  => "R",
+            _         => "?",
+        };
+        let type_color = match key.type_name.as_str() {
+            "string" => theme::SYN_STRING,
+            "list"   => theme::SYN_NUMBER,
+            "hash"   => theme::SYN_KEYWORD,
+            "set"    => theme::ACCENT,
+            "zset"   => theme::SYN_COMMENT,
+            _        => theme::TEXT_DIM,
+        };
+        div()
+            .id(SharedString::from(format!("rkey-{}", name)))
+            .h(px(theme::ROW_HEIGHT))
+            .px(px(theme::PAD_SM))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(theme::PAD_XS))
+            .border_l_2()
+            .border_color(rgb(theme::BG_PANEL))
+            .text_color(rgb(theme::TEXT_DIM))
+            .text_size(px(theme::TEXT_SIZE))
+            .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::TEXT)).border_color(rgb(theme::ACCENT)))
+            .on_click(cx.listener(move |_this, _ev, _window, cx| {
+                cx.emit(SidebarEvent::KeySelected(name.clone()));
+            }))
+            .child(
+                div()
+                    .w(px(16.))
+                    .flex()
+                    .justify_center()
+                    .text_color(rgb(type_color))
+                    .text_size(px(theme::TEXT_SIZE_XS))
+                    .font_family(theme::FONT_MONO)
+                    .child(SharedString::from(type_icon.to_string())),
+            )
+            .child(
+                div()
+                    .flex_grow()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(theme::FONT_MONO)
+                    .child(SharedString::from(key.name.clone())),
+            )
+    }
 }
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Build the tree: each database row, with table rows under the expanded one.
         let mut tree = div().id("db-tree").flex().flex_col().overflow_y_scroll();
 
-        for db in self.databases.clone() {
-            tree = tree.child(self.db_row(&db, cx));
-            if self.expanded.as_deref() == Some(db.as_str()) {
-                for t in self.tables.clone() {
-                    tree = tree.child(self.table_row(&db, &t, cx));
+        if self.redis_mode {
+            // Redis: flat key list.
+            for key in self.redis_keys.clone() {
+                tree = tree.child(self.key_row(&key, cx));
+            }
+        } else {
+            // SQL: database → table tree.
+            for db in self.databases.clone() {
+                tree = tree.child(self.db_row(&db, cx));
+                if self.expanded.as_deref() == Some(db.as_str()) {
+                    for t in self.tables.clone() {
+                        tree = tree.child(self.table_row(&db, &t, cx));
+                    }
                 }
             }
         }

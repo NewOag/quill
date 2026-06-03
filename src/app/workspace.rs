@@ -106,7 +106,7 @@ impl Workspace {
         let build_result = match config.kind {
             DbKind::Mysql => Db::mysql(self.handle.clone(), &config.mysql_url()),
             DbKind::Postgres => Db::postgres(self.handle.clone(), &config.postgres_url()),
-            DbKind::Redis => Err(anyhow::anyhow!("Redis connections are not yet supported")),
+            DbKind::Redis => Db::redis(self.handle.clone(), &config.redis_url()),
         };
         let db = match build_result {
             Ok(db) => Some(db),

@@ -195,7 +195,7 @@ impl ConnectionForm {
             .flex()
             .flex_row()
             .gap(px(theme::PAD_SM))
-            .children([(DbKind::Mysql, "MySQL"), (DbKind::Postgres, "PostgreSQL")].map(|(k, label)| {
+            .children([(DbKind::Mysql, "MySQL"), (DbKind::Postgres, "PostgreSQL"), (DbKind::Redis, "Redis")].map(|(k, label)| {
                 let active = self.kind == k;
                 div()
                     .id(SharedString::from(format!("kind-{label}")))
@@ -212,7 +212,7 @@ impl ConnectionForm {
                         let default_port = match k {
                             DbKind::Mysql => "3306",
                             DbKind::Postgres => "5432",
-                            _ => "",
+                            DbKind::Redis => "6379",
                         };
                         if !default_port.is_empty() {
                             let cur = this.port.read(cx).content().to_string();

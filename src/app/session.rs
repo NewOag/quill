@@ -96,7 +96,12 @@ impl Session {
         };
 
         this.editor.update(cx, |e, cx| e.focus(window, cx));
-        this.load_databases(cx);
+        // Redis: show key browser; SQL: show database tree.
+        if this.db.as_ref().map(|d| !d.is_sql()).unwrap_or(false) {
+            this.load_redis_keys(cx);
+        } else {
+            this.load_databases(cx);
+        }
         this
     }
 
@@ -115,6 +120,7 @@ impl Session {
                 self.editor.update(cx, |e, cx| e.set_sql(sql.clone(), cx));
                 self.run_query(sql, cx);
             }
+            SidebarEvent::KeySelected(key) => self.run_redis_key(key.clone(), cx),
             SidebarEvent::EditConnection => cx.emit(SessionEvent::EditConnection),
             SidebarEvent::DeleteConnection => cx.emit(SessionEvent::DeleteConnection),
         }
@@ -234,6 +240,66 @@ impl Session {
                 Ok(Ok(result)) => QueryState::Loaded(result),
                 Ok(Err(e)) => QueryState::Error(format!("{e:#}")),
                 Err(_) => QueryState::Error("query task dropped".into()),
+            };
+            let _ = table.update(cx, |t, cx| {
+                t.set_state(state);
+                cx.notify();
+            });
+        }));
+    }
+
+    // --- Redis-specific async methods ---------------------------------------
+
+    fn load_redis_keys(&mut self, cx: &mut Context<Self>) {
+        let Some(db) = self.db.clone() else { return };
+        let handle = db.handle();
+        let sidebar = self.sidebar.clone();
+        self._schema_task = Some(cx.spawn(async move |_weak, cx| {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            handle.spawn(async move {
+                let _ = tx.send(db.redis_scan("*", 500).await);
+            });
+            if let Ok(Ok(keys)) = rx.await {
+                let _ = sidebar.update(cx, |s, cx| {
+                    s.set_redis_keys(keys);
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    fn run_redis_key(&mut self, key: String, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.set_state(QueryState::Loading(key.clone()));
+            cx.notify();
+        });
+        let Some(db) = self.db.clone() else { return };
+        let handle = db.handle();
+        let table = self.table.clone();
+        self._query_task = Some(cx.spawn(async move |_weak, cx| {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            handle.spawn(async move {
+                let _ = tx.send(db.redis_get(&key).await);
+            });
+            let state = match rx.await {
+                Ok(Ok(val)) => {
+                    // Wrap the Redis value as a one-row QueryResult so the
+                    // existing results table + detail panel can display it.
+                    use crate::datasource::{Column, QueryResult, Row};
+                    let result = QueryResult {
+                        columns: vec![
+                            Column { name: "key".into(), type_name: val.type_name.clone() },
+                            Column { name: "value".into(), type_name: val.type_name },
+                        ],
+                        rows: vec![Row { cells: vec![
+                            Some(val.key),
+                            Some(val.display),
+                        ]}],
+                    };
+                    QueryState::Loaded(result)
+                }
+                Ok(Err(e)) => QueryState::Error(format!("{e:#}")),
+                Err(_) => QueryState::Error("key fetch dropped".into()),
             };
             let _ = table.update(cx, |t, cx| {
                 t.set_state(state);

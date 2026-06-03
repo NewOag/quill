@@ -78,6 +78,16 @@ impl ConnectionConfig {
         )
     }
 
+    /// Build a `redis-rs`-compatible URL.
+    pub fn redis_url(&self) -> String {
+        let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+        if self.password.is_empty() {
+            format!("redis://{}:{}/{}", self.host, self.port, enc(&self.database))
+        } else {
+            format!("redis://:{}@{}:{}/{}", enc(&self.password), self.host, self.port, enc(&self.database))
+        }
+    }
+
     /// Build a `tokio-postgres`-compatible connection string.
     pub fn postgres_url(&self) -> String {
         let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();

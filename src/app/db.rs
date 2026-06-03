@@ -17,16 +17,15 @@ use tokio::runtime::Handle;
 
 use crate::datasource::mysql::{self, MysqlSource};
 use crate::datasource::postgres::PostgresSource;
+use crate::datasource::redis::{KeyBrowser, RedisKey, RedisSource, RedisValue};
 use crate::datasource::{DataSource, DbKind, QueryResult, SchemaProvider, TableInfo};
 
 /// The active connection, one variant per engine.
 #[derive(Clone)]
-#[allow(dead_code)] // Redis variant is a reserved seam.
 enum Conn {
     Mysql(MysqlSource),
     Postgres(PostgresSource),
-    /// Reserved — not wired yet.
-    Redis,
+    Redis(RedisSource),
 }
 
 /// A handle to the active database, cloneable and `Send` so it can be captured
@@ -69,6 +68,19 @@ impl Db {
         })
     }
 
+    /// Build a Redis-backed `Db`. Connects eagerly.
+    pub fn redis(handle: Handle, url: &str) -> Result<Self> {
+        let url = url.to_string();
+        let source = handle.block_on(RedisSource::connect(&url))?;
+        let label = source.label.clone();
+        Ok(Self {
+            handle,
+            conn: Conn::Redis(source),
+            label,
+            kind: DbKind::Redis,
+        })
+    }
+
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -83,33 +95,26 @@ impl Db {
         self.handle.clone()
     }
 
+    /// Whether this connection uses the SQL model (MySQL/PG) vs key-value (Redis).
+    pub fn is_sql(&self) -> bool {
+        !matches!(self.conn, Conn::Redis(_))
+    }
+
     /// List databases. Async fn living in the tokio world.
     pub async fn list_databases(&self) -> Result<Vec<String>> {
         match &self.conn {
-            Conn::Mysql(src) => {
-                let mut src = src.clone();
-                src.list_databases().await
-            }
-            Conn::Postgres(src) => {
-                let mut src = src.clone();
-                src.list_databases().await
-            }
-            Conn::Redis => bail!("Redis has no databases in the SQL sense"),
+            Conn::Mysql(src) => { let mut src = src.clone(); src.list_databases().await }
+            Conn::Postgres(src) => { let mut src = src.clone(); src.list_databases().await }
+            Conn::Redis(_) => bail!("Redis has no databases in the SQL sense"),
         }
     }
 
     /// List tables in a database/schema.
     pub async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         match &self.conn {
-            Conn::Mysql(src) => {
-                let mut src = src.clone();
-                src.list_tables(schema).await
-            }
-            Conn::Postgres(src) => {
-                let mut src = src.clone();
-                src.list_tables(schema).await
-            }
-            Conn::Redis => bail!("Redis has no tables"),
+            Conn::Mysql(src) => { let mut src = src.clone(); src.list_tables(schema).await }
+            Conn::Postgres(src) => { let mut src = src.clone(); src.list_tables(schema).await }
+            Conn::Redis(_) => bail!("Redis has no tables"),
         }
     }
 
@@ -117,11 +122,26 @@ impl Db {
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
         match &self.conn {
             Conn::Mysql(src) => mysql::run_query(&src.pool(), sql).await,
-            Conn::Postgres(src) => {
-                let mut src = src.clone();
-                src.query(sql).await
-            }
-            Conn::Redis => bail!("Redis does not run SQL"),
+            Conn::Postgres(src) => { let mut src = src.clone(); src.query(sql).await }
+            Conn::Redis(_) => bail!("Redis does not run SQL"),
+        }
+    }
+
+    // --- Redis-specific methods ---
+
+    /// Scan keys matching `pattern`, up to `count` results.
+    pub async fn redis_scan(&self, pattern: &str, count: usize) -> Result<Vec<RedisKey>> {
+        match &self.conn {
+            Conn::Redis(src) => { let mut src = src.clone(); src.scan_keys(pattern, count).await }
+            _ => bail!("not a Redis connection"),
+        }
+    }
+
+    /// Fetch one Redis key's value.
+    pub async fn redis_get(&self, key: &str) -> Result<RedisValue> {
+        match &self.conn {
+            Conn::Redis(src) => { let mut src = src.clone(); src.get_value(key).await }
+            _ => bail!("not a Redis connection"),
         }
     }
 }

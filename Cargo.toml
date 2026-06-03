@@ -17,3 +17,4 @@ dirs = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
 percent-encoding = "2"
 tokio-postgres = { version = "0.7", features = ["runtime"] }
+redis = { version = "0.25", features = ["tokio-comp"] }
