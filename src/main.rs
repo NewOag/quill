@@ -27,8 +27,8 @@ use app::config::{ConnectionConfig, ConnectionStore};
 use app::workspace::Workspace;
 use datasource::DbKind;
 use ui::text_input::{
-    Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
-    SelectRight, Submit,
+    Backspace, Copy, Cut, Delete, End, Home, Left, MoveDown, MoveUp, Newline, Paste, Right,
+    SelectAll, SelectLeft, SelectRight, Submit,
 };
 
 /// Bind the text-input actions, scoped to the `"QuillInput"` key context so
@@ -48,7 +48,10 @@ fn bind_input_keys(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, ctx),
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
-        KeyBinding::new("enter", Submit, ctx),
+        KeyBinding::new("enter",     Newline, ctx),   // Enter inserts newline
+        KeyBinding::new("cmd-enter", Submit,  ctx),   // Cmd+Enter executes query
+        KeyBinding::new("up",   MoveUp,   ctx),
+        KeyBinding::new("down", MoveDown, ctx),
     ]);
 }
 

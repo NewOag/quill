@@ -16,16 +16,15 @@ use anyhow::{bail, Result};
 use tokio::runtime::Handle;
 
 use crate::datasource::mysql::{self, MysqlSource};
+use crate::datasource::postgres::PostgresSource;
 use crate::datasource::{DataSource, DbKind, QueryResult, SchemaProvider, TableInfo};
 
-/// The active connection, one variant per engine. Only MySQL connects this
-/// round; the others are reserved so `DbKind` stays a real branch end-to-end.
+/// The active connection, one variant per engine.
 #[derive(Clone)]
-#[allow(dead_code)] // Postgres/Redis variants are reserved seams for now.
+#[allow(dead_code)] // Redis variant is a reserved seam.
 enum Conn {
     Mysql(MysqlSource),
-    /// Reserved — not wired yet.
-    Postgres,
+    Postgres(PostgresSource),
     /// Reserved — not wired yet.
     Redis,
 }
@@ -56,6 +55,20 @@ impl Db {
         })
     }
 
+    /// Build a PostgreSQL-backed `Db`. Connects eagerly (tokio-postgres requires
+    /// an async connect; this blocks the caller via `handle.block_on`).
+    pub fn postgres(handle: Handle, url: &str) -> Result<Self> {
+        let url = url.to_string();
+        let source = handle.block_on(PostgresSource::connect(&url))?;
+        let label = source.label();
+        Ok(Self {
+            handle,
+            conn: Conn::Postgres(source),
+            label,
+            kind: DbKind::Postgres,
+        })
+    }
+
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -77,19 +90,25 @@ impl Db {
                 let mut src = src.clone();
                 src.list_databases().await
             }
-            Conn::Postgres => bail!("PostgreSQL not implemented yet"),
+            Conn::Postgres(src) => {
+                let mut src = src.clone();
+                src.list_databases().await
+            }
             Conn::Redis => bail!("Redis has no databases in the SQL sense"),
         }
     }
 
-    /// List tables in a database.
-    pub async fn list_tables(&self, database: &str) -> Result<Vec<TableInfo>> {
+    /// List tables in a database/schema.
+    pub async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         match &self.conn {
             Conn::Mysql(src) => {
                 let mut src = src.clone();
-                src.list_tables(database).await
+                src.list_tables(schema).await
             }
-            Conn::Postgres => bail!("PostgreSQL not implemented yet"),
+            Conn::Postgres(src) => {
+                let mut src = src.clone();
+                src.list_tables(schema).await
+            }
             Conn::Redis => bail!("Redis has no tables"),
         }
     }
@@ -98,7 +117,10 @@ impl Db {
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
         match &self.conn {
             Conn::Mysql(src) => mysql::run_query(&src.pool(), sql).await,
-            Conn::Postgres => bail!("PostgreSQL not implemented yet"),
+            Conn::Postgres(src) => {
+                let mut src = src.clone();
+                src.query(sql).await
+            }
             Conn::Redis => bail!("Redis does not run SQL"),
         }
     }

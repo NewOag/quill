@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::app::config::{ConnectionConfig, ConnectionStore};
 use crate::app::db::Db;
-use crate::app::session::Session;
+use crate::app::session::{Session, SessionEvent};
 use crate::ui::connection_form::{ConnectionForm, FormEvent};
 use crate::ui::theme;
 
@@ -40,8 +40,12 @@ pub struct Workspace {
     active: Pane,
     /// The new-connection form, present only while it's showing.
     form: Option<Entity<ConnectionForm>>,
+    /// Whether we're currently editing an existing connection (vs. creating new).
+    editing_id: Option<Uuid>,
     /// Subscription to the form's events (replaced each time a form opens).
     _form_sub: Option<Subscription>,
+    /// Subscriptions to each session's events (edit/delete connection).
+    _session_subs: Vec<Subscription>,
 }
 
 impl Workspace {
@@ -57,7 +61,9 @@ impl Workspace {
             sessions: Vec::new(),
             active: Pane::Empty,
             form: None,
+            editing_id: None,
             _form_sub: None,
+            _session_subs: Vec::new(),
         };
 
         // Auto-reopen the last-open connection, if any is recorded and still
@@ -96,7 +102,13 @@ impl Workspace {
             return;
         };
 
-        let db = match Db::mysql(self.handle.clone(), &config.mysql_url()) {
+        use crate::datasource::DbKind;
+        let build_result = match config.kind {
+            DbKind::Mysql => Db::mysql(self.handle.clone(), &config.mysql_url()),
+            DbKind::Postgres => Db::postgres(self.handle.clone(), &config.postgres_url()),
+            DbKind::Redis => Err(anyhow::anyhow!("Redis connections are not yet supported")),
+        };
+        let db = match build_result {
             Ok(db) => Some(db),
             Err(e) => {
                 // Surface the build error in the form if it's open, else log.
@@ -110,6 +122,9 @@ impl Workspace {
         };
 
         let session = cx.new(|cx| Session::new(id, db, window, cx));
+        // Subscribe to session events (edit/delete connection requests).
+        let sub = cx.subscribe_in(&session, window, Self::on_session_event);
+        self._session_subs.push(sub);
         self.sessions.push(session);
         self.active = Pane::Session(self.sessions.len() - 1);
         self.store.last_open = Some(id);
@@ -184,15 +199,60 @@ impl Workspace {
     ) {
         match event {
             FormEvent::Cancel => {
+                self.editing_id = None;
                 self.close_form();
                 cx.notify();
             }
             FormEvent::Save(config) => {
                 let config = config.clone();
                 let id = config.id;
-                self.store.connections.push(config);
+                if let Some(editing) = self.editing_id.take() {
+                    // Update existing connection.
+                    self.store.update(editing, config);
+                    self.store.save();
+                    // Rebuild the tab if it's currently open.
+                    if let Some(i) = self.session_index(editing, cx) {
+                        self.close_tab(i, cx);
+                        self.open_connection(editing, window, cx);
+                    }
+                    cx.notify();
+                } else {
+                    // New connection.
+                    self.store.connections.push(config);
+                    self.store.save();
+                    self.open_connection(id, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Handle edit/delete requests bubbled up from a Session.
+    fn on_session_event(
+        &mut self,
+        session: &Entity<Session>,
+        event: &SessionEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let config_id = session.read(cx).config_id;
+        match event {
+            SessionEvent::EditConnection => {
+                let Some(cfg) = self.store.find(config_id).cloned() else { return };
+                self.editing_id = Some(config_id);
+                let form = cx.new(|cx| ConnectionForm::new(window, cx));
+                form.update(cx, |f, cx| f.prefill(&cfg, cx));
+                self._form_sub = Some(cx.subscribe_in(&form, window, Self::on_form_event));
+                self.form = Some(form);
+                cx.notify();
+            }
+            SessionEvent::DeleteConnection => {
+                // Close the tab if open, remove from store.
+                if let Some(i) = self.session_index(config_id, cx) {
+                    self.close_tab(i, cx);
+                }
+                self.store.remove(config_id);
                 self.store.save();
-                self.open_connection(id, window, cx);
+                cx.notify();
             }
         }
     }

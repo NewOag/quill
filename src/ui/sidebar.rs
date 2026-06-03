@@ -22,6 +22,10 @@ pub enum SidebarEvent {
     DatabaseSelected(String),
     /// User clicked a table (request to query it).
     TableSelected { database: String, table: String },
+    /// User clicked the edit (✎) button on the connection header.
+    EditConnection,
+    /// User clicked the delete (✕) button on the connection header.
+    DeleteConnection,
 }
 
 /// The sidebar view.
@@ -56,8 +60,9 @@ impl Sidebar {
         self.tables = tables;
     }
 
-    fn header(&self) -> impl IntoElement {
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("conn-header")
             .h(px(theme::HEADER_HEIGHT))
             .px(px(theme::PAD_LG))
             .flex()
@@ -76,9 +81,38 @@ impl Sidebar {
             )
             .child(
                 div()
+                    .flex_grow()
                     .text_color(rgb(theme::TEXT))
                     .text_size(px(theme::TEXT_SIZE_SM))
                     .child(self.connection_label.clone()),
+            )
+            // Edit connection button.
+            .child(
+                div()
+                    .id("conn-edit")
+                    .px(px(theme::PAD_XS))
+                    .rounded(px(theme::RADIUS_SM))
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .text_size(px(theme::TEXT_SIZE_XS))
+                    .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::ACCENT)))
+                    .on_click(cx.listener(|_this, _ev, _window, cx| {
+                        cx.emit(SidebarEvent::EditConnection);
+                    }))
+                    .child("✎"),
+            )
+            // Delete connection button.
+            .child(
+                div()
+                    .id("conn-delete")
+                    .px(px(theme::PAD_XS))
+                    .rounded(px(theme::RADIUS_SM))
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .text_size(px(theme::TEXT_SIZE_XS))
+                    .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::DANGER)))
+                    .on_click(cx.listener(|_this, _ev, _window, cx| {
+                        cx.emit(SidebarEvent::DeleteConnection);
+                    }))
+                    .child(theme::ICON_CLOSE),
             )
     }
 
@@ -180,7 +214,7 @@ impl Render for Sidebar {
             .bg(rgb(theme::BG_PANEL))
             .border_r_1()
             .border_color(rgb(theme::BORDER))
-            .child(self.header())
+            .child(self.header(cx))
             .child(tree.flex_grow())
     }
 }

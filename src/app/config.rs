@@ -77,6 +77,19 @@ impl ConnectionConfig {
             enc(&self.database),
         )
     }
+
+    /// Build a `tokio-postgres`-compatible connection string.
+    pub fn postgres_url(&self) -> String {
+        let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+        format!(
+            "postgresql://{}:{}@{}:{}/{}",
+            enc(&self.user),
+            enc(&self.password),
+            self.host,
+            self.port,
+            enc(&self.database),
+        )
+    }
 }
 
 /// The full set of saved connections plus which one was last open.
@@ -137,6 +150,21 @@ impl ConnectionStore {
     /// Find a connection by id.
     pub fn find(&self, id: Uuid) -> Option<&ConnectionConfig> {
         self.connections.iter().find(|c| c.id == id)
+    }
+
+    /// Replace a saved connection in-place (edit). No-op if id not found.
+    pub fn update(&mut self, id: Uuid, new_config: ConnectionConfig) {
+        if let Some(existing) = self.connections.iter_mut().find(|c| c.id == id) {
+            *existing = new_config;
+        }
+    }
+
+    /// Remove a saved connection. Clears `last_open` if it pointed here.
+    pub fn remove(&mut self, id: Uuid) {
+        self.connections.retain(|c| c.id != id);
+        if self.last_open == Some(id) {
+            self.last_open = None;
+        }
     }
 }
 

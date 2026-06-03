@@ -122,6 +122,19 @@ impl ConnectionForm {
         self.set_error(msg, cx);
     }
 
+    /// Pre-fill all fields from an existing config (used when editing a saved
+    /// connection).
+    pub fn prefill(&mut self, cfg: &crate::app::config::ConnectionConfig, cx: &mut Context<Self>) {
+        self.kind = cfg.kind;
+        self.name.update(cx, |f, cx| f.set_content(cfg.name.clone(), cx));
+        self.host.update(cx, |f, cx| f.set_content(cfg.host.clone(), cx));
+        self.port.update(cx, |f, cx| f.set_content(cfg.port.to_string(), cx));
+        self.user.update(cx, |f, cx| f.set_content(cfg.user.clone(), cx));
+        self.password.update(cx, |f, cx| f.set_content(cfg.password.clone(), cx));
+        self.database.update(cx, |f, cx| f.set_content(cfg.database.clone(), cx));
+        self.error = None;
+    }
+
     fn labeled_field(
         &self,
         label: &str,
@@ -175,6 +188,45 @@ impl ConnectionForm {
             .on_click(cx.listener(move |this, _ev, _window, cx| on_click(this, cx)))
             .child(label)
     }
+
+    /// Two-button engine selector (MySQL / PostgreSQL).
+    fn kind_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(theme::PAD_SM))
+            .children([(DbKind::Mysql, "MySQL"), (DbKind::Postgres, "PostgreSQL")].map(|(k, label)| {
+                let active = self.kind == k;
+                div()
+                    .id(SharedString::from(format!("kind-{label}")))
+                    .px(px(theme::PAD_LG))
+                    .py(px(theme::PAD_XS))
+                    .rounded(px(theme::RADIUS))
+                    .bg(rgb(if active { theme::ACCENT } else { theme::SURFACE }))
+                    .text_color(rgb(if active { theme::BG_DEEP } else { theme::TEXT_DIM }))
+                    .text_size(px(theme::TEXT_SIZE_SM))
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.kind = k;
+                        // Adjust the default port when switching engine.
+                        let default_port = match k {
+                            DbKind::Mysql => "3306",
+                            DbKind::Postgres => "5432",
+                            _ => "",
+                        };
+                        if !default_port.is_empty() {
+                            let cur = this.port.read(cx).content().to_string();
+                            if cur == "3306" || cur == "5432" {
+                                this.port.update(cx, |p, cx| {
+                                    p.set_content(default_port, cx);
+                                });
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child(label)
+            }))
+    }
 }
 
 impl Render for ConnectionForm {
@@ -203,6 +255,7 @@ impl Render for ConnectionForm {
                         self.kind.label()
                     ))),
             )
+            .child(self.kind_selector(cx))
             .child(self.labeled_field("Name", &self.name))
             .child(self.labeled_field("Host", &self.host))
             .child(self.labeled_field("Port", &self.port))

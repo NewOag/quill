@@ -6,6 +6,8 @@
 //! hand-rolled). A transform that doesn't apply returns the original value with
 //! a short note rather than panicking.
 
+use std::ops::Range;
+
 use percent_encoding::percent_decode_str;
 
 /// How the detail panel renders the selected value.
@@ -114,9 +116,105 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     (y, m as u32, d as u32, h as u32, mi as u32, s as u32)
 }
 
+/// Token classes for JSON syntax highlighting in the detail panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonTok {
+    Key,
+    Str,
+    Number,
+    Keyword, // true / false / null
+    Punct,   // { } [ ] : ,
+    Plain,   // whitespace / anything else
+}
+
+/// Classify a (pretty-printed) JSON string into gap-free, byte-indexed spans.
+/// A best-effort lexer: a `"…"` immediately followed by `:` is a Key, other
+/// strings are Str. Covers `0..s.len()` with no gaps (unrecognized → Plain).
+pub fn tokenize_json(s: &str) -> Vec<(Range<usize>, JsonTok)> {
+    // Char-based scan: every range boundary is a valid UTF-8 char boundary, so
+    // slicing `s[range]` can never split a multi-byte char (e.g. Chinese).
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let len = s.len();
+    // byte offset just past char index k (or end of string).
+    let end_of = |k: usize| chars.get(k).map(|&(b, _)| b).unwrap_or(len);
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < chars.len() {
+        let (start, c) = chars[k];
+        if c == '"' {
+            k += 1;
+            while k < chars.len() {
+                let ch = chars[k].1;
+                if ch == '\\' {
+                    k += 2; // skip the escape and the escaped char
+                    continue;
+                }
+                if ch == '"' {
+                    k += 1;
+                    break;
+                }
+                k += 1;
+            }
+            let str_end = end_of(k);
+            // Look past whitespace for ':' → this string is an object key.
+            let mut j = k;
+            while j < chars.len() && chars[j].1.is_whitespace() {
+                j += 1;
+            }
+            let kind = if chars.get(j).map(|&(_, c)| c) == Some(':') {
+                JsonTok::Key
+            } else {
+                JsonTok::Str
+            };
+            out.push((start..str_end, kind));
+        } else if c.is_ascii_digit()
+            || (c == '-' && chars.get(k + 1).map(|&(_, c)| c.is_ascii_digit()) == Some(true))
+        {
+            k += 1;
+            while k < chars.len() && matches!(chars[k].1, '0'..='9' | '.' | 'e' | 'E' | '+' | '-') {
+                k += 1;
+            }
+            out.push((start..end_of(k), JsonTok::Number));
+        } else if c.is_ascii_alphabetic() {
+            let kstart = k;
+            while k < chars.len() && chars[k].1.is_ascii_alphabetic() {
+                k += 1;
+            }
+            let end = end_of(k);
+            let kind = match &s[chars[kstart].0..end] {
+                "true" | "false" | "null" => JsonTok::Keyword,
+                _ => JsonTok::Plain,
+            };
+            out.push((start..end, kind));
+        } else if matches!(c, '{' | '}' | '[' | ']' | ':' | ',') {
+            k += 1;
+            out.push((start..end_of(k), JsonTok::Punct));
+        } else {
+            k += 1;
+            out.push((start..end_of(k), JsonTok::Plain));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokenize_json_handles_multibyte_and_covers_all() {
+        // Chinese inside a string must not split a char; spans must be gap-free
+        // and every range must be a valid slice.
+        let s = r#"{"role":"转至续租协议","n":12}"#;
+        let toks = tokenize_json(s);
+        let mut next = 0;
+        for (r, _) in &toks {
+            assert_eq!(r.start, next, "spans must be contiguous");
+            let _ = &s[r.clone()]; // must not panic on a char boundary
+            next = r.end;
+        }
+        assert_eq!(next, s.len(), "spans must cover the whole string");
+    }
 
     #[test]
     fn raw_is_identity() {

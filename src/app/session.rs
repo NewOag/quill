@@ -18,7 +18,7 @@
 //! the older), `handle.spawn` the DB future onto tokio, carry the owned `Send`
 //! result back over a `oneshot`, then `entity.update` to re-render.
 
-use gpui::{div, prelude::*, rgb, Context, Entity, Subscription, Task, Window};
+use gpui::{div, prelude::*, rgb, Context, Entity, EventEmitter, Subscription, Task, Window};
 use uuid::Uuid;
 
 use crate::app::db::Db;
@@ -30,6 +30,17 @@ use crate::ui::theme;
 
 /// How many rows a table-click query fetches. Bounded until streaming lands.
 const ROW_LIMIT: usize = 500;
+
+/// Events a Session can emit to its owning Workspace.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// User clicked the edit-connection button in the sidebar header.
+    EditConnection,
+    /// User clicked the delete-connection button in the sidebar header.
+    DeleteConnection,
+}
+
+impl EventEmitter<SessionEvent> for Session {}
 
 pub struct Session {
     /// Links back to the saved `ConnectionConfig` (tab label, persistence).
@@ -104,6 +115,8 @@ impl Session {
                 self.editor.update(cx, |e, cx| e.set_sql(sql.clone(), cx));
                 self.run_query(sql, cx);
             }
+            SidebarEvent::EditConnection => cx.emit(SessionEvent::EditConnection),
+            SidebarEvent::DeleteConnection => cx.emit(SessionEvent::DeleteConnection),
         }
     }
 

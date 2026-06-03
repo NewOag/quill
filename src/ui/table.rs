@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use crate::datasource::{QueryResult, QueryState};
-use crate::ui::detail_format::{format_value, DetailFormat};
+use crate::ui::detail_format::{format_value, tokenize_json, DetailFormat};
 use crate::ui::theme;
 
 /// A virtualized table view driven by a [`QueryState`].
@@ -50,6 +50,8 @@ pub struct DataTable {
     order: Vec<usize>,
     /// Height of the detail panel in px (user-draggable).
     detail_height: f32,
+    /// Measured width of the detail value area, for soft-wrapping long text.
+    detail_width: f32,
     /// Which transform the detail panel applies to the selected value.
     detail_format: DetailFormat,
     /// Drag state for the detail panel's resize handle: `(start_mouse_y,
@@ -69,6 +71,7 @@ impl DataTable {
             sort: None,
             order: Vec::new(),
             detail_height: 200.0,
+            detail_width: 800.0,
             detail_format: DetailFormat::Raw,
             detail_drag: None,
         }
@@ -123,6 +126,22 @@ impl DataTable {
             .bg(rgb(theme::SURFACE))
             .border_b_1()
             .border_color(rgb(theme::BORDER))
+            // Leading row-number column header.
+            .child(
+                div()
+                    .w(px(theme::SEQ_WIDTH))
+                    .flex_none()
+                    .px(px(theme::PAD))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .border_r_1()
+                    .border_color(rgb(theme::BORDER))
+                    .font_family(theme::FONT_UI)
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .text_size(px(theme::TEXT_SIZE_XS))
+                    .child("#"),
+            )
             .children(cols.into_iter().enumerate().map(|(col_ix, c)| {
                 // Sort indicator for the active column.
                 let arrow = match sort {
@@ -257,6 +276,21 @@ impl DataTable {
                         cell
                     });
 
+                    // Leading row-number cell (follows the sort order).
+                    let seq = div()
+                        .w(px(theme::SEQ_WIDTH))
+                        .flex_none()
+                        .px(px(theme::PAD))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .border_r_1()
+                        .border_color(rgb(theme::BORDER))
+                        .font_family(theme::FONT_MONO)
+                        .text_color(rgb(theme::TEXT_DIM))
+                        .text_size(px(theme::TEXT_SIZE_XS))
+                        .child(SharedString::from((display_ix + 1).to_string()));
+
                     div()
                         .id(display_ix)
                         .flex()
@@ -267,6 +301,7 @@ impl DataTable {
                         .border_b_1()
                         .border_color(rgb(theme::BORDER))
                         .hover(|s| s.bg(rgb(theme::HOVER)))
+                        .child(seq)
                         .children(cells)
                 })
                 .collect::<Vec<_>>()
@@ -276,22 +311,71 @@ impl DataTable {
         .min_h_0()
     }
 
-    /// Footer with a row/column summary, aligned to the right.
-    fn render_footer(&self, result: &QueryResult) -> impl IntoElement {
+    /// Footer: row/col summary + CSV/JSON export buttons.
+    fn render_footer(&self, result: &QueryResult, arc: Arc<QueryResult>, cx: &mut Context<Self>) -> impl IntoElement {
         let summary = format!("{} rows × {} cols", result.row_count(), result.col_count());
+
+        // One small export button: saves to file via system dialog or copies to clipboard.
+        let export_btn = |id: &'static str,
+                          label: &'static str,
+                          arc: Arc<QueryResult>,
+                          use_csv: bool,
+                          to_file: bool,
+                          cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .px(px(theme::PAD_SM))
+                .py(px(1.))
+                .rounded(px(theme::RADIUS_SM))
+                .text_size(px(theme::TEXT_SIZE_XS))
+                .text_color(rgb(theme::TEXT_DIM))
+                .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::TEXT)))
+                .on_click(cx.listener(move |_this, _ev, _window, cx| {
+                    let data = if use_csv {
+                        crate::ui::export::to_csv(&arc)
+                    } else {
+                        crate::ui::export::to_json(&arc)
+                    };
+                    if to_file {
+                        let ext = if use_csv { "export.csv" } else { "export.json" };
+                        let dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+                        let rx = cx.prompt_for_new_path(&dir, Some(ext));
+                        cx.spawn(async move |_weak, _cx| {
+                            if let Ok(Ok(Some(path))) = rx.await {
+                                if let Err(e) = std::fs::write(&path, data) {
+                                    eprintln!("quill: export failed: {e}");
+                                }
+                            }
+                        })
+                        .detach();
+                    } else {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(data));
+                    }
+                }))
+                .child(label)
+        };
+
         div()
             .h(px(theme::ROW_HEIGHT))
             .px(px(theme::PAD_LG))
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
+            .gap(px(theme::PAD_SM))
             .bg(rgb(theme::SURFACE))
             .border_t_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT_DIM))
             .text_size(px(theme::TEXT_SIZE_XS))
             .child(SharedString::from("Result"))
+            .child(div().flex_grow())
+            // Export to file
+            .child(export_btn("exp-csv-file",  "CSV ↓",  arc.clone(), true,  true,  cx))
+            .child(export_btn("exp-json-file", "JSON ↓", arc.clone(), false, true,  cx))
+            // Copy to clipboard
+            .child(export_btn("exp-csv-clip",  "CSV ⎘",  arc.clone(), true,  false, cx))
+            .child(export_btn("exp-json-clip", "JSON ⎘", arc.clone(), false, false, cx))
+            .child(div().w(px(theme::PAD_LG)))
             .child(SharedString::from(summary))
     }
 
@@ -440,7 +524,23 @@ impl DataTable {
             .and_then(|row| row.cells.get(c))
             .map(|opt| opt.clone().unwrap_or_else(|| "NULL".into()))
             .unwrap_or_default();
-        let shown = format_value(&raw, self.detail_format);
+        // Soft-wrap long lines ourselves: gpui won't break a long run that has
+        // no whitespace (e.g. minified JSON), so it would overflow horizontally.
+        // Inserting newlines at a fixed width guarantees it fits and the
+        // overflow_y_scroll shows the rest. Width tracks the measured panel.
+        // Wrap budget from the measured panel width (≈7.5px per mono column).
+        // Because wrap_lines keeps every line ≤ this budget, the text never
+        // stretches the panel, so the measurement stays accurate frame-to-frame
+        // (90-col fallback on the very first frame before measurement lands).
+        let wrap_cols = if self.detail_width > 50.0 {
+            ((self.detail_width / 7.5) as usize).max(20)
+        } else {
+            90
+        };
+        let fmt = self.detail_format;
+        let formatted = format_value(&raw, fmt);
+        let shown = wrap_lines(&formatted, wrap_cols);
+        let measure_detail = cx.entity();
 
         Some(
             div()
@@ -512,20 +612,136 @@ impl DataTable {
                         .child(self.format_button(DetailFormat::Url, "URL", cx))
                         .child(self.format_button(DetailFormat::Timestamp, "Time", cx)),
                 )
-                // Value (transformed), monospace, scrollable.
+                // Value (transformed), monospace, scrollable. The text sits in an
+                // inner `w_full` block so it wraps and becomes taller than the
+                // box — giving the `overflow_y_scroll` container real content to
+                // scroll. (A bare text child can stay one clipped line.)
                 .child(
                     div()
                         .id("detail-value")
+                        .relative()
                         .flex_grow()
                         .min_h_0()
+                        .w_full()
                         .overflow_y_scroll()
                         .p(px(theme::PAD_LG))
-                        .font_family(theme::FONT_MONO)
-                        .text_size(px(theme::TEXT_SIZE_SM))
-                        .text_color(rgb(theme::TEXT))
-                        .child(SharedString::from(shown)),
+                        // Measure the value area's width to drive soft-wrapping.
+                        .child(
+                            canvas(
+                                move |bounds, _, cx| {
+                                    let w = f32::from(bounds.size.width);
+                                    measure_detail.update(cx, |this, _| {
+                                        if (this.detail_width - w).abs() > 1.0 {
+                                            this.detail_width = w;
+                                        }
+                                    });
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(1.)),
+                        )
+        .child(detail_value_body(&shown, fmt)),
                 ),
         )
+    }
+}
+
+/// The value text for the detail panel: a narrow line-number gutter + content.
+/// In JSON mode the content is syntax-highlighted; otherwise plain monospace.
+/// Renders line-by-line so `\n`s from `wrap_lines` stack vertically.
+fn detail_value_body(shown: &str, fmt: DetailFormat) -> gpui::AnyElement {
+    let lines: Vec<&str> = shown.split('\n').collect();
+    let line_count = lines.len();
+
+    // Gutter: right-aligned line numbers, narrower than the SQL editor gutter.
+    let gutter = div()
+        .w(px(theme::DETAIL_GUTTER_WIDTH))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .border_r_1()
+        .border_color(rgb(theme::BORDER))
+        .font_family(theme::FONT_MONO)
+        .text_size(px(theme::TEXT_SIZE_XS))
+        .text_color(rgb(theme::TEXT_DIM))
+        .children((1..=line_count).map(|n| {
+            div()
+                .w_full()
+                .pr(px(3.))
+                .flex()
+                .justify_end()
+                .child(SharedString::from(n.to_string()))
+        }));
+
+    // Content column.
+    let content: gpui::AnyElement = if fmt == DetailFormat::Json {
+        let mut col = div()
+            .flex_grow()
+            .pl(px(theme::PAD_SM))
+            .font_family(theme::FONT_MONO)
+            .text_size(px(theme::TEXT_SIZE_SM))
+            .flex()
+            .flex_col();
+        for line in &lines {
+            let line_toks = tokenize_json(line);
+            let mut row = div().flex().flex_row().flex_wrap();
+            for (range, kind) in line_toks {
+                let seg = &line[range];
+                if seg.is_empty() {
+                    continue;
+                }
+                row = row.child(
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(rgb(json_color(kind)))
+                        .child(SharedString::from(seg.to_string())),
+                );
+            }
+            col = col.child(row);
+        }
+        col.into_any_element()
+    } else {
+        let mut col = div()
+            .flex_grow()
+            .pl(px(theme::PAD_SM))
+            .font_family(theme::FONT_MONO)
+            .text_size(px(theme::TEXT_SIZE_SM))
+            .text_color(rgb(theme::TEXT))
+            .flex()
+            .flex_col();
+        for line in &lines {
+            col = col.child(
+                div()
+                    .w_full()
+                    .child(SharedString::from(line.to_string())),
+            );
+        }
+        col.into_any_element()
+    };
+
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .child(gutter)
+        .child(content)
+        .into_any_element()
+}
+
+/// Dracula colors for JSON tokens (shared with SQL syntax palette).
+fn json_color(kind: crate::ui::detail_format::JsonTok) -> u32 {
+    use crate::ui::detail_format::JsonTok::*;
+    match kind {
+        Key => theme::SYN_KEYWORD,
+        Str => theme::SYN_STRING,
+        Number => theme::SYN_NUMBER,
+        Keyword => theme::SYN_NUMBER,
+        Punct => theme::TEXT_DIM,
+        Plain => theme::TEXT,
     }
 }
 
@@ -544,7 +760,9 @@ impl Render for DataTable {
                 // margin. A `canvas` measures the real viewport width for
                 // scrollbar geometry + clamping. Three inputs set scroll_x:
                 // trackpad horizontal, Shift+wheel, and the scrollbar drag.
-                let total_width = theme::COL_WIDTH * result.col_count().max(1) as f32;
+                let total_width =
+                    theme::SEQ_WIDTH + theme::COL_WIDTH * result.col_count().max(1) as f32;
+                let arc_export = arc.clone(); // kept for footer export buttons
                 let scroll_x = self.scroll_x;
                 let selected = self.selected;
                 let order = Arc::new(self.order.clone());
@@ -614,7 +832,7 @@ impl Render for DataTable {
                 base.child(viewport)
                     .children(self.render_hscrollbar(total_width, cx))
                     .children(self.render_detail(result, cx))
-                    .child(self.render_footer(result))
+                    .child(self.render_footer(result, arc_export, cx))
             }
             (QueryState::Loading(what), _) => {
                 base.child(self.render_message(format!("running… {what}"), theme::TEXT_DIM))
@@ -626,6 +844,43 @@ impl Render for DataTable {
                 .child(self.render_message("Select a table or run a query", theme::TEXT_DIM)),
         }
     }
+}
+
+/// Soft-wrap each line of `s` to roughly `width_budget` monospace columns,
+/// breaking anywhere (so minified JSON / no-whitespace runs still fit).
+/// CJK/wide chars count as 2 columns so mixed Chinese/English wraps correctly.
+/// Preserves existing newlines; UTF-8 safe (operates on chars).
+fn wrap_lines(s: &str, width_budget: usize) -> String {
+    let budget = width_budget.max(8);
+    let char_w = |c: char| if (c as u32) >= 0x1100 && is_wide(c) { 2 } else { 1 };
+    let mut out = String::with_capacity(s.len() + s.len() / 16);
+    for (i, line) in s.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let mut w = 0usize;
+        for ch in line.chars() {
+            let cw = char_w(ch);
+            if w + cw > budget {
+                out.push('\n');
+                w = 0;
+            }
+            out.push(ch);
+            w += cw;
+        }
+    }
+    out
+}
+
+/// Rough "is this char double-width" test (CJK, fullwidth, kana, etc.).
+fn is_wide(c: char) -> bool {
+    let u = c as u32;
+    (0x1100..=0x115F).contains(&u)        // Hangul Jamo
+        || (0x2E80..=0xA4CF).contains(&u) // CJK radicals … Yi
+        || (0xAC00..=0xD7A3).contains(&u) // Hangul syllables
+        || (0xF900..=0xFAFF).contains(&u) // CJK compat ideographs
+        || (0xFF00..=0xFF60).contains(&u) // Fullwidth forms
+        || (0x20000..=0x3FFFD).contains(&u) // CJK ext B+
 }
 
 /// Compare two cells for sorting. NULLs sort last in *both* directions. For

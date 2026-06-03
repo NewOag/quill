@@ -13,7 +13,7 @@
 //! Defined in full before the Workspace uses it.
 
 use gpui::{
-    div, prelude::*, px, rgb, Context, Entity, EventEmitter, Focusable, Window,
+    div, prelude::*, px, rgb, Context, Entity, EventEmitter, Focusable, SharedString, Window,
 };
 
 use crate::ui::text_input::{InputEvent, TextInput};
@@ -36,7 +36,7 @@ impl EventEmitter<EditorEvent> for QueryEditor {}
 impl QueryEditor {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
-            TextInput::new(cx, "Type SQL and press Enter to run…").with_sql_highlight()
+            TextInput::new(cx, "Type SQL… (Enter=newline, Cmd+Enter=run)").with_sql_highlight()
         });
 
         // When the input emits Submit (Enter), run its current content.
@@ -95,6 +95,34 @@ impl QueryEditor {
             .child(theme::ICON_RUN)
             .child("Run")
     }
+
+    /// Left line-number gutter. Line count is derived from the input content
+    /// (`\n` count + 1), so it's correct for single- and multi-line SQL alike.
+    /// Top padding + text size match the input so numbers align with text rows.
+    fn line_gutter(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.input.read(cx).content();
+        let line_count = content.matches('\n').count() + 1;
+        div()
+            .w(px(theme::GUTTER_WIDTH))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .py(px(theme::PAD_LG))
+            .bg(rgb(theme::BG_DEEP))
+            .border_r_1()
+            .border_color(rgb(theme::BORDER))
+            .font_family(theme::FONT_MONO)
+            .text_size(px(theme::TEXT_SIZE))
+            .text_color(rgb(theme::TEXT_DIM))
+            .children((1..=line_count).map(|n| {
+                div()
+                    .w_full()
+                    .pr(px(theme::PAD_SM))
+                    .flex()
+                    .justify_end()
+                    .child(SharedString::from(n.to_string()))
+            }))
+    }
 }
 
 impl Render for QueryEditor {
@@ -127,15 +155,27 @@ impl Render for QueryEditor {
                     )
                     .child(self.run_button(cx)),
             )
-            // Editable input area — monospace, since it's SQL.
+            // Editable input area — a line-number gutter + the monospace input.
+            // The content area scrolls vertically when the SQL grows taller
+            // than the pane; the input element's height auto-grows with lines.
             .child(
                 div()
+                    .id("editor-scroll")
                     .flex_grow()
-                    .p(px(theme::PAD_LG))
-                    .font_family(theme::FONT_MONO)
-                    .text_color(rgb(theme::TEXT))
-                    .text_size(px(theme::TEXT_SIZE))
-                    .child(self.input.clone()),
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_row()
+                    .child(self.line_gutter(cx))
+                    .child(
+                        div()
+                            .flex_grow()
+                            .py(px(theme::PAD_LG))
+                            .pr(px(theme::PAD_LG))
+                            .font_family(theme::FONT_MONO)
+                            .text_color(rgb(theme::TEXT))
+                            .text_size(px(theme::TEXT_SIZE))
+                            .child(self.input.clone()),
+                    ),
             )
     }
 }

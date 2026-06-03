@@ -92,6 +92,12 @@ pub const RADIUS_LG: f32 = 8.0;
 
 /// Default fixed column width in the results table.
 pub const COL_WIDTH: f32 = 160.0;
+/// Width of the leading row-number (`#`) column in the results table.
+pub const SEQ_WIDTH: f32 = 56.0;
+/// Width of the SQL editor's line-number gutter.
+pub const GUTTER_WIDTH: f32 = 40.0;
+/// Width of the detail panel's narrower line-number gutter.
+pub const DETAIL_GUTTER_WIDTH: f32 = 28.0;
 /// Standard single-line row height (tree rows, table rows).
 pub const ROW_HEIGHT: f32 = 24.0;
 /// Tab bar height.
