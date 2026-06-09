@@ -26,7 +26,7 @@ use crate::datasource::{Column, QueryResult, QueryState, Row, TableInfo};
 use crate::ui::editor::{EditorEvent, QueryEditor};
 use crate::ui::redis_view::RedisView;
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
-use crate::ui::table::DataTable;
+use crate::ui::table::{DataTable, TableEvent};
 use crate::ui::theme;
 
 /// How many rows a table-click query fetches. Bounded until streaming lands.
@@ -54,6 +54,11 @@ pub struct Session {
     table: Option<Entity<DataTable>>,
     /// Redis mode view (None for SQL connections).
     redis_view: Option<Entity<RedisView>>,
+
+    /// Database and table name from the last sidebar table-click query.
+    /// Set only for table-click queries; cleared on manual SQL edits.
+    current_database: Option<String>,
+    current_table: Option<String>,
 
     /// Subscriptions to the panes; held so they live as long as this session.
     _subs: Vec<Subscription>,
@@ -86,13 +91,16 @@ impl Session {
             (None, None, Some(rv))
         } else {
             let e = cx.new(|cx| QueryEditor::new(window, cx));
-            let t = cx.new(|_| DataTable::new());
+            let t = cx.new(|cx| DataTable::new(cx));
             (Some(e), Some(t), None)
         };
 
         let mut subs = vec![cx.subscribe(&sidebar, Self::on_sidebar_event)];
         if let Some(ed) = &editor {
             subs.push(cx.subscribe(ed, Self::on_editor_event));
+        }
+        if let Some(t) = &table {
+            subs.push(cx.subscribe(t, Self::on_table_event));
         }
 
         let mut this = Self {
@@ -102,6 +110,8 @@ impl Session {
             editor,
             table,
             redis_view,
+            current_database: None,
+            current_table: None,
             _subs: subs,
             _schema_task: None,
             _query_task: None,
@@ -129,13 +139,28 @@ impl Session {
         cx: &mut Context<Self>,
     ) {
         match event {
-            SidebarEvent::DatabaseSelected(db_name) => self.load_tables(db_name.clone(), cx),
+            SidebarEvent::DatabaseSelected(db_name) => {
+                // Navigating to a different database — the current table context is stale.
+                self.current_database = None;
+                self.current_table = None;
+                if let Some(t) = &self.table {
+                    t.update(cx, |tbl, _| tbl.set_editable(false));
+                }
+                self.load_tables(db_name.clone(), cx);
+            }
             SidebarEvent::TableSelected { database, table } => {
+                // Record context so run_cell_update can build UPDATE SQL.
+                self.current_database = Some(database.clone());
+                self.current_table = Some(table.clone());
                 let sql = select_all_sql(database, table, ROW_LIMIT);
                 if let Some(ed) = &self.editor {
                     ed.update(cx, |e, cx| e.set_sql(sql.clone(), cx));
                 }
                 self.run_query(sql, cx);
+                // Mark the table as editable now that context is set.
+                if let Some(t) = &self.table {
+                    t.update(cx, |tbl, _| tbl.set_editable(true));
+                }
             }
             SidebarEvent::KeySelected(key) => {
                 if let Some(rv) = &self.redis_view {
@@ -156,6 +181,12 @@ impl Session {
         match event {
             EditorEvent::Run(sql) => {
                 if !sql.trim().is_empty() {
+                    // Manual SQL — lose the table context so inline editing is disabled.
+                    self.current_database = None;
+                    self.current_table = None;
+                    if let Some(t) = &self.table {
+                        t.update(cx, |tbl, _| tbl.set_editable(false));
+                    }
                     self.run_query(sql.clone(), cx);
                 }
             }
@@ -270,6 +301,106 @@ impl Session {
         }));
     }
 
+    // --- inline cell edit ---------------------------------------------------
+
+    fn on_table_event(
+        &mut self,
+        _table: Entity<DataTable>,
+        event: &TableEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TableEvent::UpdateCell { orig_row, col, new_value } => {
+                self.run_cell_update(*orig_row, *col, new_value.clone(), cx);
+            }
+        }
+    }
+
+    fn run_cell_update(&mut self, orig_row: usize, col: usize, new_value: String, cx: &mut Context<Self>) {
+        let (db_name, table_name) = match (&self.current_database, &self.current_table) {
+            (Some(d), Some(t)) => (d.clone(), t.clone()),
+            _ => return,
+        };
+
+        let result = match self.table.as_ref().and_then(|t| t.read(cx).loaded_result()) {
+            Some(r) => r,
+            None => return,
+        };
+
+        let sql = build_update_sql(&db_name, &table_name, orig_row, col, &new_value, &result);
+        if sql.is_empty() {
+            return;
+        }
+
+        // Show loading state, run the UPDATE, then re-run the SELECT to refresh.
+        let Some(table_entity) = self.table.clone() else { return };
+        let Some(db) = self.db.clone() else { return };
+        let handle = db.handle();
+
+        // The refresh query is the current SELECT * (re-run with same db/table).
+        let refresh_sql = select_all_sql(&db_name, &table_name, ROW_LIMIT);
+
+        table_entity.update(cx, |t, cx| {
+            t.set_state(QueryState::Loading("updating…".into()));
+            cx.notify();
+        });
+
+        let table = table_entity;
+        self._query_task = Some(cx.spawn(async move |_weak, cx| {
+            // Execute the UPDATE.
+            let (tx, rx) = futures::channel::oneshot::channel::<anyhow::Result<()>>();
+            let sql_for_task = sql.clone();
+            let db2 = db.clone();
+            handle.spawn(async move {
+                let _ = tx.send(db2.execute(&sql_for_task).await);
+            });
+
+            match rx.await {
+                Ok(Ok(())) => {
+                    // Re-fetch the table so the edit is visible.
+                    let (tx2, rx2) = futures::channel::oneshot::channel();
+                    handle.spawn(async move {
+                        let _ = tx2.send(db.query(&refresh_sql).await);
+                    });
+                    match rx2.await {
+                        Ok(Ok(result)) => {
+                            // Keep editable after refresh.
+                            let _ = table.update(cx, |t, cx| {
+                                t.set_state(QueryState::Loaded(result));
+                                t.set_editable(true);
+                                cx.notify();
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            let _ = table.update(cx, |t, cx| {
+                                t.set_state(QueryState::Error(format!("{e:#}")));
+                                cx.notify();
+                            });
+                        }
+                        Err(_) => {
+                            let _ = table.update(cx, |t, cx| {
+                                t.set_state(QueryState::Error("refresh task dropped".into()));
+                                cx.notify();
+                            });
+                        }
+                    };
+                }
+                Ok(Err(e)) => {
+                    let _ = table.update(cx, |t, cx| {
+                        t.set_state(QueryState::Error(format!("UPDATE failed: {e:#}")));
+                        cx.notify();
+                    });
+                }
+                Err(_) => {
+                    let _ = table.update(cx, |t, cx| {
+                        t.set_state(QueryState::Error("update task dropped".into()));
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+    }
+
     // --- Redis-specific async methods ---------------------------------------
 
     fn load_redis_keys(&mut self, cx: &mut Context<Self>) {
@@ -322,6 +453,59 @@ impl Render for Session {
 fn select_all_sql(database: &str, table: &str, limit: usize) -> String {
     let q = |id: &str| id.replace('`', "``");
     format!("SELECT * FROM `{}`.`{}` LIMIT {limit}", q(database), q(table))
+}
+
+/// Escape a string value for use in a SQL literal (single-quote doubling).
+fn sql_escape(v: &str) -> String {
+    v.replace('\'', "''")
+}
+
+/// Build an `UPDATE` statement that sets `col` to `new_value` in `orig_row`.
+/// Uses all non-NULL column values as WHERE conditions + `LIMIT 1` for safety.
+/// Returns an empty string if the row or column index is out of bounds.
+fn build_update_sql(
+    database: &str,
+    table: &str,
+    orig_row: usize,
+    col: usize,
+    new_value: &str,
+    result: &QueryResult,
+) -> String {
+    let row = match result.rows.get(orig_row) {
+        Some(r) => r,
+        None => return String::new(),
+    };
+    let set_col = match result.columns.get(col) {
+        Some(c) => &c.name,
+        None => return String::new(),
+    };
+
+    let q = |id: &str| id.replace('`', "``");
+    let set_clause = format!("`{}` = '{}'", q(set_col), sql_escape(new_value));
+
+    // WHERE: every non-NULL column value (including the one being updated, using
+    // its *original* value so the row is still identifiable).
+    let where_parts: Vec<String> = result
+        .columns
+        .iter()
+        .zip(row.cells.iter())
+        .filter_map(|(c, cell)| {
+            cell.as_ref().map(|v| format!("`{}` = '{}'", q(&c.name), sql_escape(v)))
+        })
+        .collect();
+
+    if where_parts.is_empty() {
+        // All-NULL row — can't safely identify it.
+        return String::new();
+    }
+
+    format!(
+        "UPDATE `{}`.`{}` SET {} WHERE {} LIMIT 1",
+        q(database),
+        q(table),
+        set_clause,
+        where_parts.join(" AND "),
+    )
 }
 
 // --- sample-mode data (no DB) ---------------------------------------------

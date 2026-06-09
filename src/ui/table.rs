@@ -12,13 +12,23 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use gpui::{
-    canvas, div, prelude::*, px, rgb, uniform_list, Context, MouseButton, MouseMoveEvent,
-    MouseUpEvent, SharedString, Window,
+    canvas, div, prelude::*, px, rgb, uniform_list, Context, EventEmitter, Focusable,
+    MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window,
 };
 
 use crate::datasource::{QueryResult, QueryState};
 use crate::ui::detail_format::{format_value, tokenize_json, DetailFormat};
+use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::theme;
+
+/// Events emitted by `DataTable` to the owning `Session`.
+#[derive(Debug, Clone)]
+pub enum TableEvent {
+    /// User committed an inline cell edit; the session should execute an UPDATE.
+    UpdateCell { orig_row: usize, col: usize, new_value: String },
+}
+
+impl EventEmitter<TableEvent> for DataTable {}
 
 /// A virtualized table view driven by a [`QueryState`].
 ///
@@ -57,10 +67,25 @@ pub struct DataTable {
     /// Drag state for the detail panel's resize handle: `(start_mouse_y,
     /// start_height)` while dragging.
     detail_drag: Option<(f32, f32)>,
+    /// Whether the current result is editable (set by Session when the query
+    /// was triggered by a sidebar table click, so the db+table are known).
+    editable: bool,
+    /// The cell currently being inline-edited as `(display_row, col)`.
+    editing: Option<(usize, usize)>,
+    /// Reusable text input widget for inline cell editing.
+    edit_input: gpui::Entity<TextInput>,
 }
 
 impl DataTable {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let edit_input = cx.new(|cx| TextInput::new(cx, ""));
+        // Commit edit on Enter.
+        cx.subscribe(&edit_input, |this, _input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Submit) {
+                this.commit_edit(cx);
+            }
+        })
+        .detach();
         Self {
             state: QueryState::Idle,
             loaded: None,
@@ -74,7 +99,54 @@ impl DataTable {
             detail_width: 800.0,
             detail_format: DetailFormat::Raw,
             detail_drag: None,
+            editable: false,
+            editing: None,
+            edit_input,
         }
+    }
+
+    /// Mark whether the current result allows inline editing. Called by Session
+    /// after a table-click query (where db+table are known).
+    pub fn set_editable(&mut self, editable: bool) {
+        self.editable = editable;
+    }
+
+    /// Expose the loaded result so Session can read row data to build UPDATE SQL.
+    pub fn loaded_result(&self) -> Option<Arc<QueryResult>> {
+        self.loaded.clone()
+    }
+
+    /// Enter edit mode for a cell identified by *display* row + column.
+    fn start_edit(&mut self, display_row: usize, col: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(result) = &self.loaded else { return };
+        let orig_row = match self.order.get(display_row) { Some(&r) => r, None => return };
+        let current = result.rows.get(orig_row)
+            .and_then(|r| r.cells.get(col))
+            .and_then(|c| c.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
+        self.editing = Some((display_row, col));
+        self.selected = Some((display_row, col));
+        self.edit_input.update(cx, |inp, cx| inp.set_content(current, cx));
+        let focus = self.edit_input.read(cx).focus_handle(cx).clone();
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    /// Cancel inline edit without committing.
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.editing = None;
+        cx.notify();
+    }
+
+    /// Commit the inline edit: read the input value, map display→orig row, emit event.
+    fn commit_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((display_row, col)) = self.editing.take() else { return };
+        let new_value = self.edit_input.read(cx).content().to_string();
+        let orig_row = match self.order.get(display_row) { Some(&r) => r, None => return };
+        cx.emit(TableEvent::UpdateCell { orig_row, col, new_value });
+        cx.notify();
     }
 
     /// Replace the current state and refresh. Called by the owning view inside
@@ -89,6 +161,9 @@ impl DataTable {
         self.scroll_x = 0.0;
         self.sort = None;
         self.detail_format = DetailFormat::Raw;
+        self.editing = None;
+        // Note: `editable` is NOT reset here — Session controls it explicitly via
+        // set_editable() so it survives the async set_state call from run_query.
         self.rebuild_order();
         self.state = state;
     }
@@ -209,6 +284,9 @@ impl DataTable {
         result: Arc<QueryResult>,
         total_width: f32,
         selected: Option<(usize, usize)>,
+        editing: Option<(usize, usize)>,
+        edit_input: gpui::Entity<TextInput>,
+        editable: bool,
         order: Arc<Vec<usize>>,
         entity: gpui::Entity<Self>,
     ) -> impl IntoElement {
@@ -219,6 +297,7 @@ impl DataTable {
             let result = result.clone();
             let order = order.clone();
             let entity = entity.clone();
+            let edit_input = edit_input.clone();
             range
                 .map(|display_ix| {
                     // Map display position → original row via the sort order.
@@ -231,16 +310,19 @@ impl DataTable {
                     };
 
                     let row_entity = entity.clone();
+                    let edit_input = edit_input.clone();
                     let cells = (0..col_count).map(move |col_ix| {
                         let value = row.cells.get(col_ix).and_then(|c| c.as_ref());
                         let is_selected = selected == Some((display_ix, col_ix));
+                        let is_editing = editing == Some((display_ix, col_ix));
+
                         // Fixed-width cell; clip overflow to one line with an
                         // ellipsis so long values never bleed into neighbors.
                         let mut cell = div()
                             .id(("cell", display_ix * col_count + col_ix))
                             .w(px(theme::COL_WIDTH))
                             .flex_none()
-                            .px(px(theme::PAD))
+                            .px(px(if is_editing { 0.0 } else { theme::PAD }))
                             .flex()
                             .items_center()
                             .overflow_hidden()
@@ -250,29 +332,63 @@ impl DataTable {
                             .text_size(px(theme::TEXT_SIZE_SM))
                             .on_click({
                                 let entity = row_entity.clone();
-                                move |_ev, _window, cx| {
+                                move |ev, window, cx| {
                                     entity.update(cx, |this, cx| {
                                         this.selected = Some((display_ix, col_ix));
+                                        // Cancel any in-progress edit when clicking elsewhere.
+                                        if this.editing.is_some()
+                                            && this.editing != Some((display_ix, col_ix))
+                                        {
+                                            this.editing = None;
+                                        }
                                         cx.notify();
                                     });
+                                    // Double-click enters edit mode (editable tables only).
+                                    if ev.click_count() == 2 {
+                                        entity.update(cx, |this, cx| {
+                                            if this.editable {
+                                                this.start_edit(display_ix, col_ix, window, cx);
+                                            }
+                                        });
+                                    }
                                 }
                             });
-                        if is_selected {
-                            cell = cell.bg(rgb(theme::SELECTED)).border_color(rgb(theme::ACCENT));
+
+                        if is_editing {
+                            // Render the inline TextInput in place of the cell text.
+                            cell = cell
+                                .bg(rgb(theme::BG_DEEP))
+                                .border_color(rgb(theme::ACCENT))
+                                .child(edit_input.clone());
+                        } else {
+                            if is_selected {
+                                cell = cell.bg(rgb(theme::SELECTED)).border_color(rgb(theme::ACCENT));
+                            }
+                            cell = match value {
+                                Some(v) => cell.text_color(rgb(theme::TEXT)).child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .child(SharedString::from(v.clone())),
+                                ),
+                                // NULL: dim + italic to read as "absent", not data.
+                                None => cell
+                                    .text_color(rgb(theme::TEXT_DIM))
+                                    .italic()
+                                    .child(SharedString::from("NULL")),
+                            };
+                            // Show pencil hint on hover for editable tables.
+                            if editable && is_selected {
+                                cell = cell.child(
+                                    div()
+                                        .flex_none()
+                                        .pl(px(theme::PAD_XS))
+                                        .text_color(rgb(theme::TEXT_DIM))
+                                        .text_size(px(theme::TEXT_SIZE_XS))
+                                        .child("✎"),
+                                );
+                            }
                         }
-                        cell = match value {
-                            Some(v) => cell.text_color(rgb(theme::TEXT)).child(
-                                div()
-                                    .w_full()
-                                    .truncate()
-                                    .child(SharedString::from(v.clone())),
-                            ),
-                            // NULL: dim + italic to read as "absent", not data.
-                            None => cell
-                                .text_color(rgb(theme::TEXT_DIM))
-                                .italic()
-                                .child(SharedString::from("NULL")),
-                        };
                         cell
                     });
 
@@ -542,6 +658,10 @@ impl DataTable {
         let shown = wrap_lines(&formatted, wrap_cols);
         let measure_detail = cx.entity();
 
+        let is_editing_this = self.editing == Some((display_row, c));
+        let editable = self.editable;
+        let edit_input = self.edit_input.clone();
+
         Some(
             div()
                 .flex_none()
@@ -581,7 +701,7 @@ impl DataTable {
                             cx.listener(|this, _ev, _w, _cx| this.detail_drag = None),
                         ),
                 )
-                // Toolbar: column name + format buttons.
+                // Toolbar: column name + format buttons + optional edit controls.
                 .child(
                     div()
                         .flex_none()
@@ -606,16 +726,70 @@ impl DataTable {
                                     display_row + 1
                                 ))),
                         )
-                        .child(self.format_button(DetailFormat::Raw, "Raw", cx))
-                        .child(self.format_button(DetailFormat::Json, "JSON", cx))
-                        .child(self.format_button(DetailFormat::Base64, "Base64", cx))
-                        .child(self.format_button(DetailFormat::Url, "URL", cx))
-                        .child(self.format_button(DetailFormat::Timestamp, "Time", cx)),
+                        // Format buttons (hidden while editing so the toolbar stays compact).
+                        .when(!is_editing_this, |this| {
+                            this.child(self.format_button(DetailFormat::Raw, "Raw", cx))
+                                .child(self.format_button(DetailFormat::Json, "JSON", cx))
+                                .child(self.format_button(DetailFormat::Base64, "Base64", cx))
+                                .child(self.format_button(DetailFormat::Url, "URL", cx))
+                                .child(self.format_button(DetailFormat::Timestamp, "Time", cx))
+                        })
+                        // Edit button (only for editable tables, not while already editing).
+                        .when(editable && !is_editing_this, |this| {
+                            this.child(
+                                div()
+                                    .id("detail-edit-btn")
+                                    .px(px(theme::PAD_SM))
+                                    .py(px(1.))
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .font_family(theme::FONT_UI)
+                                    .text_size(px(theme::TEXT_SIZE_XS))
+                                    .bg(rgb(theme::SURFACE))
+                                    .text_color(rgb(theme::ACCENT))
+                                    .hover(|s| s.bg(rgb(theme::HOVER)))
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        this.start_edit(display_row, c, window, cx);
+                                    }))
+                                    .child("Edit"),
+                            )
+                        })
+                        // Save / Cancel buttons while editing.
+                        .when(is_editing_this, |this| {
+                            this.child(
+                                div()
+                                    .id("detail-save-btn")
+                                    .px(px(theme::PAD_SM))
+                                    .py(px(1.))
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .font_family(theme::FONT_UI)
+                                    .text_size(px(theme::TEXT_SIZE_XS))
+                                    .bg(rgb(theme::ACCENT))
+                                    .text_color(rgb(theme::BG_DEEP))
+                                    .hover(|s| s.bg(rgb(theme::ACCENT_DIM)))
+                                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                                        this.commit_edit(cx);
+                                    }))
+                                    .child("Save"),
+                            )
+                            .child(
+                                div()
+                                    .id("detail-cancel-btn")
+                                    .px(px(theme::PAD_SM))
+                                    .py(px(1.))
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .font_family(theme::FONT_UI)
+                                    .text_size(px(theme::TEXT_SIZE_XS))
+                                    .bg(rgb(theme::SURFACE))
+                                    .text_color(rgb(theme::TEXT_DIM))
+                                    .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::DANGER)))
+                                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                                        this.cancel_edit(cx);
+                                    }))
+                                    .child("Cancel"),
+                            )
+                        }),
                 )
-                // Value (transformed), monospace, scrollable. The text sits in an
-                // inner `w_full` block so it wraps and becomes taller than the
-                // box — giving the `overflow_y_scroll` container real content to
-                // scroll. (A bare text child can stay one clipped line.)
+                // Value area: show inline edit input or formatted read-only text.
                 .child(
                     div()
                         .id("detail-value")
@@ -644,7 +818,10 @@ impl DataTable {
                             .right_0()
                             .h(px(1.)),
                         )
-        .child(detail_value_body(&shown, fmt)),
+                        .when(is_editing_this, |this| this.child(edit_input))
+                        .when(!is_editing_this, |this| {
+                            this.child(detail_value_body(&shown, fmt))
+                        }),
                 ),
         )
     }
@@ -765,6 +942,9 @@ impl Render for DataTable {
                 let arc_export = arc.clone(); // kept for footer export buttons
                 let scroll_x = self.scroll_x;
                 let selected = self.selected;
+                let editing = self.editing;
+                let editable = self.editable;
+                let edit_input = self.edit_input.clone();
                 let order = Arc::new(self.order.clone());
                 let entity = cx.entity();
                 let measure_entity = cx.entity();
@@ -784,7 +964,7 @@ impl Render for DataTable {
                     .flex()
                     .flex_col()
                     .child(self.render_header(result, total_width, cx))
-                    .child(self.render_body(arc, total_width, selected, order, entity));
+                    .child(self.render_body(arc, total_width, selected, editing, edit_input, editable, order, entity));
 
                 let measure = canvas(
                     move |bounds, _, cx| {

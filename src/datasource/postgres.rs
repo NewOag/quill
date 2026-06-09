@@ -103,6 +103,15 @@ impl DataSource for PostgresSource {
     }
 }
 
+impl PostgresSource {
+    /// Execute a statement that produces no result set (UPDATE, INSERT, DELETE, …).
+    pub async fn execute(&mut self, sql: &str) -> Result<()> {
+        let client = self.client.lock().await;
+        client.execute(sql, &[]).await.context("execute failed")?;
+        Ok(())
+    }
+}
+
 impl SchemaProvider for PostgresSource {
     async fn list_databases(&mut self) -> Result<Vec<String>> {
         let client = self.client.lock().await;

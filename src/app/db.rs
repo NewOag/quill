@@ -127,6 +127,15 @@ impl Db {
         }
     }
 
+    /// Execute a statement that returns no rows (INSERT, UPDATE, DELETE, …).
+    pub async fn execute(&self, sql: &str) -> Result<()> {
+        match &self.conn {
+            Conn::Mysql(src) => mysql::run_execute(&src.pool(), sql).await,
+            Conn::Postgres(src) => { let mut src = src.clone(); src.execute(sql).await }
+            Conn::Redis(_) => bail!("Redis does not run SQL"),
+        }
+    }
+
     // --- Redis-specific methods ---
 
     /// Scan keys matching `pattern`, up to `count` results.

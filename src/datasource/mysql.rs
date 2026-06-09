@@ -128,6 +128,14 @@ pub async fn run_query(pool: &Pool, sql: &str) -> Result<QueryResult> {
     })
 }
 
+/// Execute a statement that produces no result set (UPDATE, INSERT, DELETE).
+/// Free function like `run_query` so the async bridge can call it without `&mut self`.
+pub async fn run_execute(pool: &Pool, sql: &str) -> Result<()> {
+    let mut conn = pool.get_conn().await.context("get connection")?;
+    conn.exec_drop(sql, ()).await.context("execute failed")?;
+    Ok(())
+}
+
 /// Map a driver column type to a short, familiar SQL-ish name for the header
 /// (e.g. `MYSQL_TYPE_VAR_STRING` → `VARCHAR`), instead of the verbose debug
 /// form. Unknown types fall back to a trimmed debug string.
