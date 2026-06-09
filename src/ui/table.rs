@@ -12,12 +12,12 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use gpui::{
-    canvas, div, prelude::*, px, rgb, uniform_list, Context, EventEmitter, Focusable,
-    MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window,
+    Context, EventEmitter, Focusable, MouseButton, MouseMoveEvent, MouseUpEvent, SharedString,
+    Window, canvas, div, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::datasource::{QueryResult, QueryState};
-use crate::ui::detail_format::{format_value, tokenize_json, DetailFormat};
+use crate::ui::detail_format::{DetailFormat, format_value, tokenize_json};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::theme;
 
@@ -25,7 +25,11 @@ use crate::ui::theme;
 #[derive(Debug, Clone)]
 pub enum TableEvent {
     /// User committed an inline cell edit; the session should execute an UPDATE.
-    UpdateCell { orig_row: usize, col: usize, new_value: String },
+    UpdateCell {
+        orig_row: usize,
+        col: usize,
+        new_value: String,
+    },
 }
 
 impl EventEmitter<TableEvent> for DataTable {}
@@ -117,10 +121,21 @@ impl DataTable {
     }
 
     /// Enter edit mode for a cell identified by *display* row + column.
-    fn start_edit(&mut self, display_row: usize, col: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_edit(
+        &mut self,
+        display_row: usize,
+        col: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(result) = &self.loaded else { return };
-        let orig_row = match self.order.get(display_row) { Some(&r) => r, None => return };
-        let current = result.rows.get(orig_row)
+        let orig_row = match self.order.get(display_row) {
+            Some(&r) => r,
+            None => return,
+        };
+        let current = result
+            .rows
+            .get(orig_row)
             .and_then(|r| r.cells.get(col))
             .and_then(|c| c.as_ref())
             .cloned()
@@ -128,7 +143,8 @@ impl DataTable {
 
         self.editing = Some((display_row, col));
         self.selected = Some((display_row, col));
-        self.edit_input.update(cx, |inp, cx| inp.set_content(current, cx));
+        self.edit_input
+            .update(cx, |inp, cx| inp.set_content(current, cx));
         let focus = self.edit_input.read(cx).focus_handle(cx).clone();
         window.focus(&focus);
         cx.notify();
@@ -142,10 +158,19 @@ impl DataTable {
 
     /// Commit the inline edit: read the input value, map display→orig row, emit event.
     fn commit_edit(&mut self, cx: &mut Context<Self>) {
-        let Some((display_row, col)) = self.editing.take() else { return };
+        let Some((display_row, col)) = self.editing.take() else {
+            return;
+        };
         let new_value = self.edit_input.read(cx).content().to_string();
-        let orig_row = match self.order.get(display_row) { Some(&r) => r, None => return };
-        cx.emit(TableEvent::UpdateCell { orig_row, col, new_value });
+        let orig_row = match self.order.get(display_row) {
+            Some(&r) => r,
+            None => return,
+        };
+        cx.emit(TableEvent::UpdateCell {
+            orig_row,
+            col,
+            new_value,
+        });
         cx.notify();
     }
 
@@ -362,7 +387,9 @@ impl DataTable {
                                 .child(edit_input.clone());
                         } else {
                             if is_selected {
-                                cell = cell.bg(rgb(theme::SELECTED)).border_color(rgb(theme::ACCENT));
+                                cell = cell
+                                    .bg(rgb(theme::SELECTED))
+                                    .border_color(rgb(theme::ACCENT));
                             }
                             cell = match value {
                                 Some(v) => cell.text_color(rgb(theme::TEXT)).child(
@@ -428,7 +455,12 @@ impl DataTable {
     }
 
     /// Footer: row/col summary + CSV/JSON export buttons.
-    fn render_footer(&self, result: &QueryResult, arc: Arc<QueryResult>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_footer(
+        &self,
+        result: &QueryResult,
+        arc: Arc<QueryResult>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let summary = format!("{} rows × {} cols", result.row_count(), result.col_count());
 
         // One small export button: saves to file via system dialog or copies to clipboard.
@@ -486,11 +518,39 @@ impl DataTable {
             .child(SharedString::from("Result"))
             .child(div().flex_grow())
             // Export to file
-            .child(export_btn("exp-csv-file",  "CSV ↓",  arc.clone(), true,  true,  cx))
-            .child(export_btn("exp-json-file", "JSON ↓", arc.clone(), false, true,  cx))
+            .child(export_btn(
+                "exp-csv-file",
+                "CSV ↓",
+                arc.clone(),
+                true,
+                true,
+                cx,
+            ))
+            .child(export_btn(
+                "exp-json-file",
+                "JSON ↓",
+                arc.clone(),
+                false,
+                true,
+                cx,
+            ))
             // Copy to clipboard
-            .child(export_btn("exp-csv-clip",  "CSV ⎘",  arc.clone(), true,  false, cx))
-            .child(export_btn("exp-json-clip", "JSON ⎘", arc.clone(), false, false, cx))
+            .child(export_btn(
+                "exp-csv-clip",
+                "CSV ⎘",
+                arc.clone(),
+                true,
+                false,
+                cx,
+            ))
+            .child(export_btn(
+                "exp-json-clip",
+                "JSON ⎘",
+                arc.clone(),
+                false,
+                false,
+                cx,
+            ))
             .child(div().w(px(theme::PAD_LG)))
             .child(SharedString::from(summary))
     }
@@ -512,7 +572,11 @@ impl DataTable {
     /// sync with trackpad scrolling. The thumb's mouse handlers are registered
     /// via a `canvas` (like gpui's `examples/data_table.rs`) so they get the
     /// thumb's real painted bounds.
-    fn render_hscrollbar(&self, total_width: f32, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_hscrollbar(
+        &self,
+        total_width: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let track_w = self.viewport_w;
         // Need a measured viewport and an overflowing grid.
         if track_w <= 0.0 || total_width <= track_w + 1.0 {
@@ -616,8 +680,16 @@ impl DataTable {
             .rounded(px(theme::RADIUS_SM))
             .font_family(theme::FONT_UI)
             .text_size(px(theme::TEXT_SIZE_XS))
-            .bg(rgb(if active { theme::ACCENT } else { theme::SURFACE }))
-            .text_color(rgb(if active { theme::BG_DEEP } else { theme::TEXT_DIM }))
+            .bg(rgb(if active {
+                theme::ACCENT
+            } else {
+                theme::SURFACE
+            }))
+            .text_color(rgb(if active {
+                theme::BG_DEEP
+            } else {
+                theme::TEXT_DIM
+            }))
             .hover(|s| s.text_color(rgb(theme::TEXT)))
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.detail_format = fmt;
@@ -629,7 +701,11 @@ impl DataTable {
     /// Draggable detail panel showing the selected cell's full value, with a
     /// format toolbar (Raw/JSON/Base64/URL/Time). `None` when nothing is
     /// selected. Height is user-adjustable via the top drag handle.
-    fn render_detail(&self, result: &QueryResult, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_detail(
+        &self,
+        result: &QueryResult,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let (display_row, c) = self.selected?;
         let col = result.columns.get(c)?;
         // Selection row is in display space → map to the original row.
@@ -781,7 +857,9 @@ impl DataTable {
                                     .text_size(px(theme::TEXT_SIZE_XS))
                                     .bg(rgb(theme::SURFACE))
                                     .text_color(rgb(theme::TEXT_DIM))
-                                    .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::DANGER)))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme::HOVER)).text_color(rgb(theme::DANGER))
+                                    })
                                     .on_click(cx.listener(|this, _ev, _w, cx| {
                                         this.cancel_edit(cx);
                                     }))
@@ -891,11 +969,7 @@ fn detail_value_body(shown: &str, fmt: DetailFormat) -> gpui::AnyElement {
             .flex()
             .flex_col();
         for line in &lines {
-            col = col.child(
-                div()
-                    .w_full()
-                    .child(SharedString::from(line.to_string())),
-            );
+            col = col.child(div().w_full().child(SharedString::from(line.to_string())));
         }
         col.into_any_element()
     };
@@ -964,7 +1038,16 @@ impl Render for DataTable {
                     .flex()
                     .flex_col()
                     .child(self.render_header(result, total_width, cx))
-                    .child(self.render_body(arc, total_width, selected, editing, edit_input, editable, order, entity));
+                    .child(self.render_body(
+                        arc,
+                        total_width,
+                        selected,
+                        editing,
+                        edit_input,
+                        editable,
+                        order,
+                        entity,
+                    ));
 
                 let measure = canvas(
                     move |bounds, _, cx| {
@@ -989,23 +1072,25 @@ impl Render for DataTable {
                     .flex_grow()
                     .min_h_0()
                     .overflow_hidden()
-                    .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, window, cx| {
-                        let d = ev.delta.pixel_delta(window.line_height());
-                        let dx = f32::from(d.x);
-                        let dy = f32::from(d.y);
-                        let amount = if ev.modifiers.shift {
-                            if dx.abs() > dy.abs() { dx } else { dy }
-                        } else if dx.abs() > dy.abs() {
-                            dx
-                        } else {
-                            0.0
-                        };
-                        if amount != 0.0 {
-                            let max = (total_width - this.viewport_w).max(0.0);
-                            this.scroll_x = (this.scroll_x - amount).clamp(0.0, max);
-                            cx.notify();
-                        }
-                    }))
+                    .on_scroll_wheel(cx.listener(
+                        move |this, ev: &gpui::ScrollWheelEvent, window, cx| {
+                            let d = ev.delta.pixel_delta(window.line_height());
+                            let dx = f32::from(d.x);
+                            let dy = f32::from(d.y);
+                            let amount = if ev.modifiers.shift {
+                                if dx.abs() > dy.abs() { dx } else { dy }
+                            } else if dx.abs() > dy.abs() {
+                                dx
+                            } else {
+                                0.0
+                            };
+                            if amount != 0.0 {
+                                let max = (total_width - this.viewport_w).max(0.0);
+                                this.scroll_x = (this.scroll_x - amount).clamp(0.0, max);
+                                cx.notify();
+                            }
+                        },
+                    ))
                     .child(measure)
                     .child(content);
 
@@ -1020,8 +1105,7 @@ impl Render for DataTable {
             (QueryState::Error(e), _) => {
                 base.child(self.render_message(format!("error: {e}"), theme::DANGER))
             }
-            _ => base
-                .child(self.render_message("Select a table or run a query", theme::TEXT_DIM)),
+            _ => base.child(self.render_message("Select a table or run a query", theme::TEXT_DIM)),
         }
     }
 }
@@ -1032,7 +1116,13 @@ impl Render for DataTable {
 /// Preserves existing newlines; UTF-8 safe (operates on chars).
 fn wrap_lines(s: &str, width_budget: usize) -> String {
     let budget = width_budget.max(8);
-    let char_w = |c: char| if (c as u32) >= 0x1100 && is_wide(c) { 2 } else { 1 };
+    let char_w = |c: char| {
+        if (c as u32) >= 0x1100 && is_wide(c) {
+            2
+        } else {
+            1
+        }
+    };
     let mut out = String::with_capacity(s.len() + s.len() / 16);
     for (i, line) in s.split('\n').enumerate() {
         if i > 0 {
@@ -1076,11 +1166,7 @@ fn cmp_cells(a: Option<&String>, b: Option<&String>, ascending: bool) -> Orderin
                 (Ok(nx), Ok(ny)) => nx.partial_cmp(&ny).unwrap_or(Ordering::Equal),
                 _ => x.cmp(y),
             };
-            if ascending {
-                base
-            } else {
-                base.reverse()
-            }
+            if ascending { base } else { base.reverse() }
         }
     }
 }
@@ -1092,23 +1178,38 @@ mod tests {
 
     fn one_row_result() -> QueryResult {
         QueryResult {
-            columns: vec![Column { name: "id".into(), type_name: "INT".into() }],
-            rows: vec![Row { cells: vec![Some("1".into())] }],
+            columns: vec![Column {
+                name: "id".into(),
+                type_name: "INT".into(),
+            }],
+            rows: vec![Row {
+                cells: vec![Some("1".into())],
+            }],
         }
     }
 
     #[test]
     fn set_state_caches_arc_only_when_loaded() {
-        let mut t = DataTable::new();
-        assert!(t.loaded.is_none());
+        // DataTable::new requires a gpui Context, so we drive it through a
+        // TestAppContext instead of constructing it directly.
+        let mut cx = gpui::TestAppContext::single();
+        let table = cx.new(|cx| DataTable::new(cx));
+        cx.update(|app| {
+            table.update(app, |t, _cx| {
+                assert!(t.loaded.is_none());
 
-        t.set_state(QueryState::Loading("x".into()));
-        assert!(t.loaded.is_none(), "loading must not cache a result");
+                t.set_state(QueryState::Loading("x".into()));
+                assert!(t.loaded.is_none(), "loading must not cache a result");
 
-        t.set_state(QueryState::Loaded(one_row_result()));
-        assert!(t.loaded.is_some(), "loaded must cache the Arc for the row closure");
+                t.set_state(QueryState::Loaded(one_row_result()));
+                assert!(
+                    t.loaded.is_some(),
+                    "loaded must cache the Arc for the row closure"
+                );
 
-        t.set_state(QueryState::Error("boom".into()));
-        assert!(t.loaded.is_none(), "error must clear the cached result");
+                t.set_state(QueryState::Error("boom".into()));
+                assert!(t.loaded.is_none(), "error must clear the cached result");
+            });
+        });
     }
 }

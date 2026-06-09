@@ -23,15 +23,15 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
-    ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::ui::sql_highlight::{tokenize_sql, TokenKind};
+use crate::ui::sql_highlight::{TokenKind, tokenize_sql};
 use crate::ui::theme;
 
 /// Map a SQL token kind to its display color (raw RGB).
@@ -518,9 +518,13 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let starts = &self.last_line_starts;
-        if starts.is_empty() { return None; }
+        if starts.is_empty() {
+            return None;
+        }
         // Use the start of the range to find the line; return a single-line rect.
-        let row = starts.partition_point(|&s| s <= range.start).saturating_sub(1);
+        let row = starts
+            .partition_point(|&s| s <= range.start)
+            .saturating_sub(1);
         let line = self.last_lines.get(row)?;
         let col_start = range.start - starts[row];
         let col_end = (range.end - starts[row]).min(line.len());
@@ -532,7 +536,10 @@ impl EntityInputHandler for TextInput {
         let y = bounds.top() + gpui::px(line_height * row as f32);
         Some(Bounds::from_corners(
             point(bounds.left() + line.x_for_index(col_start), y),
-            point(bounds.left() + line.x_for_index(col_end), y + gpui::px(line_height)),
+            point(
+                bounds.left() + line.x_for_index(col_end),
+                y + gpui::px(line_height),
+            ),
         ))
     }
 
@@ -602,23 +609,37 @@ fn runs_for_slice(runs: &[TextRun], ls: usize, le: usize, template: &TextRun) ->
     if ls >= le {
         // Empty line (e.g. after a trailing '\n'): return a zero-len run so
         // shape_line gets a non-empty slice and doesn't panic.
-        return vec![TextRun { len: 0, ..template.clone() }];
+        return vec![TextRun {
+            len: 0,
+            ..template.clone()
+        }];
     }
     let mut result = Vec::new();
     let mut pos = 0;
     for r in runs {
         let run_end = pos + r.len;
-        if run_end <= ls { pos = run_end; continue; }
-        if pos >= le { break; }
+        if run_end <= ls {
+            pos = run_end;
+            continue;
+        }
+        if pos >= le {
+            break;
+        }
         let slice_start = pos.max(ls);
         let slice_end = run_end.min(le);
         if slice_start < slice_end {
-            result.push(TextRun { len: slice_end - slice_start, ..r.clone() });
+            result.push(TextRun {
+                len: slice_end - slice_start,
+                ..r.clone()
+            });
         }
         pos = run_end;
     }
     if result.is_empty() || result.iter().map(|r| r.len).sum::<usize>() == 0 {
-        result = vec![TextRun { len: le - ls, ..template.clone() }];
+        result = vec![TextRun {
+            len: le - ls,
+            ..template.clone()
+        }];
     }
     result
 }
@@ -702,7 +723,9 @@ impl Element for TextElement {
         let line_starts: Vec<usize> = {
             let mut v = vec![0usize];
             for (i, b) in display.bytes().enumerate() {
-                if b == b'\n' { v.push(i + 1); }
+                if b == b'\n' {
+                    v.push(i + 1);
+                }
             }
             v
         };
@@ -711,7 +734,11 @@ impl Element for TextElement {
         let template = TextRun {
             len: 0,
             font: style.font(),
-            color: if show_placeholder { rgb(theme::TEXT_DIM).into() } else { style.color },
+            color: if show_placeholder {
+                rgb(theme::TEXT_DIM).into()
+            } else {
+                style.color
+            },
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -728,21 +755,46 @@ impl Element for TextElement {
                 })
                 .collect()
         } else {
-            vec![TextRun { len: display.len(), ..template.clone() }]
+            vec![TextRun {
+                len: display.len(),
+                ..template.clone()
+            }]
         };
 
         // Layer IME underline.
         let underlined_runs: Vec<TextRun> = if let Some(ref marked) = marked_range {
-            let ul = UnderlineStyle { color: Some(template.color), thickness: px(1.0), wavy: false };
+            let ul = UnderlineStyle {
+                color: Some(template.color),
+                thickness: px(1.0),
+                wavy: false,
+            };
             let mut out = Vec::new();
             let mut pos = 0;
             for r in global_runs {
-                let start = pos; let end = pos + r.len; pos = end;
+                let start = pos;
+                let end = pos + r.len;
+                pos = end;
                 let mi = marked.start.clamp(start, end);
                 let mj = marked.end.clamp(start, end);
-                if start < mi { out.push(TextRun { len: mi - start, ..r.clone() }); }
-                if mi < mj   { out.push(TextRun { len: mj - mi, underline: Some(ul), ..r.clone() }); }
-                if mj < end  { out.push(TextRun { len: end - mj, ..r.clone() }); }
+                if start < mi {
+                    out.push(TextRun {
+                        len: mi - start,
+                        ..r.clone()
+                    });
+                }
+                if mi < mj {
+                    out.push(TextRun {
+                        len: mj - mi,
+                        underline: Some(ul),
+                        ..r.clone()
+                    });
+                }
+                if mj < end {
+                    out.push(TextRun {
+                        len: end - mj,
+                        ..r.clone()
+                    });
+                }
             }
             out.into_iter().filter(|r| r.len > 0).collect()
         } else {
@@ -762,16 +814,18 @@ impl Element for TextElement {
             let line_text = SharedString::from(display[ls..le].to_string());
             // Extract sub-runs that overlap this line.
             let line_runs = runs_for_slice(&underlined_runs, ls, le, &template);
-            let shaped = window.text_system().shape_line(
-                line_text, font_size, &line_runs, None,
-            );
+            let shaped = window
+                .text_system()
+                .shape_line(line_text, font_size, &line_runs, None);
             lines.push(shaped);
         }
 
         // Cursor position.
         let cursor_quad = {
             let (row, col) = {
-                let r = line_starts.partition_point(|&s| s <= cursor_offset).saturating_sub(1);
+                let r = line_starts
+                    .partition_point(|&s| s <= cursor_offset)
+                    .saturating_sub(1);
                 (r, cursor_offset - line_starts[r])
             };
             let x = lines.get(row).map(|l| l.x_for_index(col)).unwrap_or(px(0.));
@@ -787,22 +841,35 @@ impl Element for TextElement {
         if !selected_range.is_empty() {
             let sel_color = rgba(0x89b4fa40);
             let (s_row, s_col) = {
-                let r = line_starts.partition_point(|&s| s <= selected_range.start).saturating_sub(1);
+                let r = line_starts
+                    .partition_point(|&s| s <= selected_range.start)
+                    .saturating_sub(1);
                 (r, selected_range.start - line_starts[r])
             };
             let (e_row, e_col) = {
-                let r = line_starts.partition_point(|&s| s <= selected_range.end).saturating_sub(1);
+                let r = line_starts
+                    .partition_point(|&s| s <= selected_range.end)
+                    .saturating_sub(1);
                 (r, selected_range.end - line_starts[r])
             };
             for row in s_row..=e_row {
-                let line_w = lines.get(row).map(|l| l.x_for_index(l.len())).unwrap_or(px(0.));
+                let line_w = lines
+                    .get(row)
+                    .map(|l| l.x_for_index(l.len()))
+                    .unwrap_or(px(0.));
                 let x0 = if row == s_row {
-                    lines.get(row).map(|l| l.x_for_index(s_col)).unwrap_or(px(0.))
+                    lines
+                        .get(row)
+                        .map(|l| l.x_for_index(s_col))
+                        .unwrap_or(px(0.))
                 } else {
                     px(0.)
                 };
                 let x1 = if row == e_row {
-                    lines.get(row).map(|l| l.x_for_index(e_col)).unwrap_or(line_w)
+                    lines
+                        .get(row)
+                        .map(|l| l.x_for_index(e_col))
+                        .unwrap_or(line_w)
                 } else {
                     line_w + px(6.) // extend slightly past end of line to show newline included
                 };
@@ -818,7 +885,13 @@ impl Element for TextElement {
         }
 
         let cursor = selected_range.is_empty().then_some(cursor_quad);
-        PrepaintState { lines, line_starts, cursor, selections, line_height }
+        PrepaintState {
+            lines,
+            line_starts,
+            cursor,
+            selections,
+            line_height,
+        }
     }
 
     fn paint(

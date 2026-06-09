@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -82,9 +82,20 @@ impl ConnectionConfig {
     pub fn redis_url(&self) -> String {
         let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
         if self.password.is_empty() {
-            format!("redis://{}:{}/{}", self.host, self.port, enc(&self.database))
+            format!(
+                "redis://{}:{}/{}",
+                self.host,
+                self.port,
+                enc(&self.database)
+            )
         } else {
-            format!("redis://:{}@{}:{}/{}", enc(&self.password), self.host, self.port, enc(&self.database))
+            format!(
+                "redis://:{}@{}:{}/{}",
+                enc(&self.password),
+                self.host,
+                self.port,
+                enc(&self.database)
+            )
         }
     }
 

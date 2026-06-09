@@ -11,7 +11,7 @@
 //! fall through to the tabs behind it.
 
 use gpui::{
-    div, prelude::*, px, rgb, Context, Entity, MouseButton, SharedString, Subscription, Window,
+    Context, Entity, MouseButton, SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
 use tokio::runtime::Handle;
 use uuid::Uuid;
@@ -241,7 +241,9 @@ impl Workspace {
         let config_id = session.read(cx).config_id;
         match event {
             SessionEvent::EditConnection => {
-                let Some(cfg) = self.store.find(config_id).cloned() else { return };
+                let Some(cfg) = self.store.find(config_id).cloned() else {
+                    return;
+                };
                 self.editing_id = Some(config_id);
                 let form = cx.new(|cx| ConnectionForm::new(window, cx));
                 form.update(cx, |f, cx| f.prefill(&cfg, cx));
@@ -298,7 +300,11 @@ impl Workspace {
                 .unwrap_or_else(|| "(connection)".into());
             let is_active = active_index == Some(i);
             // Active tab: raised surface + a 2px accent bar along the top edge.
-            let top_accent = if is_active { theme::ACCENT } else { theme::BG_DEEP };
+            let top_accent = if is_active {
+                theme::ACCENT
+            } else {
+                theme::BG_DEEP
+            };
 
             bar = bar.child(
                 div()
@@ -312,9 +318,17 @@ impl Workspace {
                     .rounded_t(px(theme::RADIUS))
                     .border_t_2()
                     .border_color(rgb(top_accent))
-                    .bg(rgb(if is_active { theme::SURFACE } else { theme::BG_PANEL }))
+                    .bg(rgb(if is_active {
+                        theme::SURFACE
+                    } else {
+                        theme::BG_PANEL
+                    }))
                     .text_size(px(theme::TEXT_SIZE_SM))
-                    .text_color(rgb(if is_active { theme::TEXT } else { theme::TEXT_DIM }))
+                    .text_color(rgb(if is_active {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_DIM
+                    }))
                     .hover(|s| s.bg(rgb(theme::SURFACE)).text_color(rgb(theme::TEXT)))
                     .on_click(cx.listener(move |this, _ev, _window, cx| this.activate(i, cx)))
                     .child(SharedString::from(name))
@@ -351,8 +365,16 @@ impl Workspace {
                 .h(px(theme::TAB_HEIGHT - 10.))
                 .px(px(theme::PAD_SM))
                 .rounded(px(theme::RADIUS_SM))
-                .text_color(rgb(if show_list { theme::ACCENT } else { theme::TEXT_DIM }))
-                .bg(rgb(if show_list { theme::SURFACE } else { theme::BG_PANEL }))
+                .text_color(rgb(if show_list {
+                    theme::ACCENT
+                } else {
+                    theme::TEXT_DIM
+                }))
+                .bg(rgb(if show_list {
+                    theme::SURFACE
+                } else {
+                    theme::BG_PANEL
+                }))
                 .text_size(px(theme::TEXT_SIZE_SM))
                 .hover(|s| s.bg(rgb(theme::HOVER)).text_color(rgb(theme::TEXT)))
                 .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -361,9 +383,9 @@ impl Workspace {
                 }))
                 .child("Connections")
                 .child(
-                    div().text_size(px(9.)).child(
-                        if show_list { "▴" } else { "▾" }
-                    )
+                    div()
+                        .text_size(px(9.))
+                        .child(if show_list { "▴" } else { "▾" }),
                 ),
         );
 
@@ -388,7 +410,11 @@ impl Workspace {
     }
 
     /// Dropdown panel listing all saved connections, anchored below the tab bar.
-    fn conn_dropdown(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn conn_dropdown(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         if !self.show_conn_list {
             return None;
         }
@@ -498,12 +524,12 @@ impl Workspace {
                             .child(SharedString::from(name)),
                     )
                     // "open" indicator
-                    .children(is_open.then(||
+                    .children(is_open.then(|| {
                         div()
                             .text_size(px(theme::TEXT_SIZE_XS))
                             .text_color(rgb(theme::TEXT_DIM))
-                            .child("open"),
-                    ))
+                            .child("open")
+                    }))
                     // Delete button — stops propagation so it doesn't also open
                     // the connection.
                     .child(

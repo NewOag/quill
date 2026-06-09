@@ -12,7 +12,7 @@
 //! module means the UI never accidentally awaits a driver future on gpui's
 //! executor — the #1 footgun in mixing the two async worlds.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use tokio::runtime::Handle;
 
 use crate::datasource::mysql::{self, MysqlSource};
@@ -103,8 +103,14 @@ impl Db {
     /// List databases. Async fn living in the tokio world.
     pub async fn list_databases(&self) -> Result<Vec<String>> {
         match &self.conn {
-            Conn::Mysql(src) => { let mut src = src.clone(); src.list_databases().await }
-            Conn::Postgres(src) => { let mut src = src.clone(); src.list_databases().await }
+            Conn::Mysql(src) => {
+                let mut src = src.clone();
+                src.list_databases().await
+            }
+            Conn::Postgres(src) => {
+                let mut src = src.clone();
+                src.list_databases().await
+            }
             Conn::Redis(_) => bail!("Redis has no databases in the SQL sense"),
         }
     }
@@ -112,8 +118,14 @@ impl Db {
     /// List tables in a database/schema.
     pub async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
         match &self.conn {
-            Conn::Mysql(src) => { let mut src = src.clone(); src.list_tables(schema).await }
-            Conn::Postgres(src) => { let mut src = src.clone(); src.list_tables(schema).await }
+            Conn::Mysql(src) => {
+                let mut src = src.clone();
+                src.list_tables(schema).await
+            }
+            Conn::Postgres(src) => {
+                let mut src = src.clone();
+                src.list_tables(schema).await
+            }
             Conn::Redis(_) => bail!("Redis has no tables"),
         }
     }
@@ -122,7 +134,10 @@ impl Db {
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
         match &self.conn {
             Conn::Mysql(src) => mysql::run_query(&src.pool(), sql).await,
-            Conn::Postgres(src) => { let mut src = src.clone(); src.query(sql).await }
+            Conn::Postgres(src) => {
+                let mut src = src.clone();
+                src.query(sql).await
+            }
             Conn::Redis(_) => bail!("Redis does not run SQL"),
         }
     }
@@ -131,7 +146,10 @@ impl Db {
     pub async fn execute(&self, sql: &str) -> Result<()> {
         match &self.conn {
             Conn::Mysql(src) => mysql::run_execute(&src.pool(), sql).await,
-            Conn::Postgres(src) => { let mut src = src.clone(); src.execute(sql).await }
+            Conn::Postgres(src) => {
+                let mut src = src.clone();
+                src.execute(sql).await
+            }
             Conn::Redis(_) => bail!("Redis does not run SQL"),
         }
     }
@@ -141,7 +159,10 @@ impl Db {
     /// Scan keys matching `pattern`, up to `count` results.
     pub async fn redis_scan(&self, pattern: &str, count: usize) -> Result<Vec<RedisKey>> {
         match &self.conn {
-            Conn::Redis(src) => { let mut src = src.clone(); src.scan_keys(pattern, count).await }
+            Conn::Redis(src) => {
+                let mut src = src.clone();
+                src.scan_keys(pattern, count).await
+            }
             _ => bail!("not a Redis connection"),
         }
     }
@@ -149,7 +170,10 @@ impl Db {
     /// Fetch one Redis key's value + TTL.
     pub async fn redis_get(&self, key: &str) -> Result<RedisKeyDetail> {
         match &self.conn {
-            Conn::Redis(src) => { let mut src = src.clone(); src.get_value(key).await }
+            Conn::Redis(src) => {
+                let mut src = src.clone();
+                src.get_value(key).await
+            }
             _ => bail!("not a Redis connection"),
         }
     }
@@ -157,7 +181,10 @@ impl Db {
     /// Execute an arbitrary Redis command line and return the response string.
     pub async fn redis_cmd(&self, cmd_line: &str) -> Result<String> {
         match &self.conn {
-            Conn::Redis(src) => { let mut src = src.clone(); src.exec_cmd(cmd_line).await }
+            Conn::Redis(src) => {
+                let mut src = src.clone();
+                src.exec_cmd(cmd_line).await
+            }
             _ => bail!("not a Redis connection"),
         }
     }

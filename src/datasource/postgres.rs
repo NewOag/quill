@@ -8,8 +8,8 @@
 //! inside tokio tasks.
 
 use anyhow::{Context as _, Result};
-use tokio::sync::Mutex;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
 
 use super::{Column, DataSource, DbKind, QueryResult, Row, SchemaProvider, TableInfo};
@@ -27,9 +27,7 @@ impl PostgresSource {
     /// tokio runtime (must be called from within a tokio context, i.e. inside
     /// `handle.spawn(...)`).
     pub async fn connect(url: &str) -> Result<Self> {
-        let config: tokio_postgres::Config = url
-            .parse()
-            .context("invalid PostgreSQL URL")?;
+        let config: tokio_postgres::Config = url.parse().context("invalid PostgreSQL URL")?;
 
         // Label: user@host:port/db
         let label = format!(
@@ -92,14 +90,15 @@ impl DataSource for PostgresSource {
         let out_rows = rows
             .into_iter()
             .map(|r| {
-                let cells = (0..r.len())
-                    .map(|i| pg_cell_to_string(&r, i))
-                    .collect();
+                let cells = (0..r.len()).map(|i| pg_cell_to_string(&r, i)).collect();
                 Row { cells }
             })
             .collect();
 
-        Ok(QueryResult { columns, rows: out_rows })
+        Ok(QueryResult {
+            columns,
+            rows: out_rows,
+        })
     }
 }
 
@@ -155,14 +154,28 @@ impl SchemaProvider for PostgresSource {
 /// order. Returns `None` for SQL NULL or unsupported/unrecognized types.
 fn pg_cell_to_string(row: &tokio_postgres::Row, idx: usize) -> Option<String> {
     // String / text first (covers varchar, text, char, …).
-    if let Ok(v) = row.try_get::<_, Option<String>>(idx) { return v; }
+    if let Ok(v) = row.try_get::<_, Option<String>>(idx) {
+        return v;
+    }
     // Numeric types.
-    if let Ok(v) = row.try_get::<_, Option<i64>>(idx)  { return v.map(|x| x.to_string()); }
-    if let Ok(v) = row.try_get::<_, Option<i32>>(idx)  { return v.map(|x| x.to_string()); }
-    if let Ok(v) = row.try_get::<_, Option<i16>>(idx)  { return v.map(|x| x.to_string()); }
-    if let Ok(v) = row.try_get::<_, Option<f64>>(idx)  { return v.map(|x| x.to_string()); }
-    if let Ok(v) = row.try_get::<_, Option<f32>>(idx)  { return v.map(|x| x.to_string()); }
-    if let Ok(v) = row.try_get::<_, Option<bool>>(idx) { return v.map(|x| x.to_string()); }
+    if let Ok(v) = row.try_get::<_, Option<i64>>(idx) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<_, Option<i32>>(idx) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<_, Option<i16>>(idx) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<_, Option<f64>>(idx) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<_, Option<f32>>(idx) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<_, Option<bool>>(idx) {
+        return v.map(|x| x.to_string());
+    }
     // Bytes (bytea) → show as hex.
     if let Ok(v) = row.try_get::<_, Option<Vec<u8>>>(idx) {
         return v.map(|b| b.iter().map(|x| format!("{x:02x}")).collect());

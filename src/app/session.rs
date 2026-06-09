@@ -18,7 +18,7 @@
 //! the older), `handle.spawn` the DB future onto tokio, carry the owned `Send`
 //! result back over a `oneshot`, then `entity.update` to re-render.
 
-use gpui::{div, prelude::*, rgb, Context, Entity, EventEmitter, Subscription, Task, Window};
+use gpui::{Context, Entity, EventEmitter, Subscription, Task, Window, div, prelude::*, rgb};
 use uuid::Uuid;
 
 use crate::app::db::Db;
@@ -248,7 +248,9 @@ impl Session {
     }
 
     fn run_query(&mut self, sql: String, cx: &mut Context<Self>) {
-        let Some(table_entity) = self.table.clone() else { return };
+        let Some(table_entity) = self.table.clone() else {
+            return;
+        };
         let preview = sql.chars().take(60).collect::<String>();
         table_entity.update(cx, |t, cx| {
             t.set_state(QueryState::Loading(preview));
@@ -310,13 +312,23 @@ impl Session {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TableEvent::UpdateCell { orig_row, col, new_value } => {
+            TableEvent::UpdateCell {
+                orig_row,
+                col,
+                new_value,
+            } => {
                 self.run_cell_update(*orig_row, *col, new_value.clone(), cx);
             }
         }
     }
 
-    fn run_cell_update(&mut self, orig_row: usize, col: usize, new_value: String, cx: &mut Context<Self>) {
+    fn run_cell_update(
+        &mut self,
+        orig_row: usize,
+        col: usize,
+        new_value: String,
+        cx: &mut Context<Self>,
+    ) {
         let (db_name, table_name) = match (&self.current_database, &self.current_table) {
             (Some(d), Some(t)) => (d.clone(), t.clone()),
             _ => return,
@@ -333,7 +345,9 @@ impl Session {
         }
 
         // Show loading state, run the UPDATE, then re-run the SELECT to refresh.
-        let Some(table_entity) = self.table.clone() else { return };
+        let Some(table_entity) = self.table.clone() else {
+            return;
+        };
         let Some(db) = self.db.clone() else { return };
         let handle = db.handle();
 
@@ -420,7 +434,6 @@ impl Session {
             }
         }));
     }
-
 }
 
 impl Render for Session {
@@ -435,7 +448,11 @@ impl Render for Session {
                 .flex()
                 .flex_col()
                 .children(self.editor.clone())
-                .children(self.table.as_ref().map(|t| div().flex_grow().child(t.clone())))
+                .children(
+                    self.table
+                        .as_ref()
+                        .map(|t| div().flex_grow().child(t.clone())),
+                )
         };
         div()
             .size_full()
@@ -452,7 +469,11 @@ impl Render for Session {
 /// of the quoting.
 fn select_all_sql(database: &str, table: &str, limit: usize) -> String {
     let q = |id: &str| id.replace('`', "``");
-    format!("SELECT * FROM `{}`.`{}` LIMIT {limit}", q(database), q(table))
+    format!(
+        "SELECT * FROM `{}`.`{}` LIMIT {limit}",
+        q(database),
+        q(table)
+    )
 }
 
 /// Escape a string value for use in a SQL literal (single-quote doubling).
@@ -490,7 +511,8 @@ fn build_update_sql(
         .iter()
         .zip(row.cells.iter())
         .filter_map(|(c, cell)| {
-            cell.as_ref().map(|v| format!("`{}` = '{}'", q(&c.name), sql_escape(v)))
+            cell.as_ref()
+                .map(|v| format!("`{}` = '{}'", q(&c.name), sql_escape(v)))
         })
         .collect();
 
@@ -512,18 +534,39 @@ fn build_update_sql(
 
 fn sample_tables() -> Vec<TableInfo> {
     vec![
-        TableInfo { name: "users".into(), kind: "table".into() },
-        TableInfo { name: "orders".into(), kind: "table".into() },
-        TableInfo { name: "active_users".into(), kind: "view".into() },
+        TableInfo {
+            name: "users".into(),
+            kind: "table".into(),
+        },
+        TableInfo {
+            name: "orders".into(),
+            kind: "table".into(),
+        },
+        TableInfo {
+            name: "active_users".into(),
+            kind: "view".into(),
+        },
     ]
 }
 
 fn sample_result() -> QueryResult {
     let columns = vec![
-        Column { name: "id".into(), type_name: "INT".into() },
-        Column { name: "name".into(), type_name: "VARCHAR".into() },
-        Column { name: "email".into(), type_name: "VARCHAR".into() },
-        Column { name: "note".into(), type_name: "TEXT".into() },
+        Column {
+            name: "id".into(),
+            type_name: "INT".into(),
+        },
+        Column {
+            name: "name".into(),
+            type_name: "VARCHAR".into(),
+        },
+        Column {
+            name: "email".into(),
+            type_name: "VARCHAR".into(),
+        },
+        Column {
+            name: "note".into(),
+            type_name: "TEXT".into(),
+        },
     ];
     let rows = (0..500)
         .map(|i| Row {
@@ -531,7 +574,11 @@ fn sample_result() -> QueryResult {
                 Some(i.to_string()),
                 Some(format!("user_{i}")),
                 Some(format!("user_{i}@example.com")),
-                if i % 7 == 0 { None } else { Some(format!("note {i}")) },
+                if i % 7 == 0 {
+                    None
+                } else {
+                    Some(format!("note {i}"))
+                },
             ],
         })
         .collect();
